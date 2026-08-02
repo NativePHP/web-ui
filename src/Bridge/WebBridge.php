@@ -35,7 +35,7 @@ use Native\Mobile\Testing\FakeBridge;
  * WebScreenRunner::boot() enables one per request; the instance is also
  * aliased under FakeBridge::class so the global polyfills find it.
  */
-class WebBridge extends FakeBridge
+class WebBridge extends FakeBridge implements \Native\Mobile\Contracts\GatedBridge
 {
     /**
      * Client effects queued this request, oldest first.
