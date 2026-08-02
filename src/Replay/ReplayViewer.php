@@ -8,14 +8,63 @@ use Native\Mobile\Edge\Web\Renderer\WebRenderer;
  * POC time-travel viewer: server-renders every recorded tree frame to
  * HTML via the same WebRenderer the live web target uses, then a small
  * scrubber page steps through them with events marked on the timeline.
+ *
+ * Recordings are written by nativephp/mobile-record (or a device
+ * running it); the coupling is the JSONL files in
+ * storage/app/edge-recordings only, so this viewer ships its own
+ * reader instead of importing the recorder.
  */
 class ReplayViewer
 {
+    /** @return array<int, array{name: string, frames: int, bytes: int, mtime: int}> */
+    protected static function recordings(): array
+    {
+        $dir = storage_path('app/edge-recordings');
+
+        if (! is_dir($dir)) {
+            return [];
+        }
+
+        $out = [];
+
+        foreach (glob($dir.'/*.jsonl') as $file) {
+            $out[] = [
+                'name' => basename($file, '.jsonl'),
+                'frames' => count(file($file)),
+                'bytes' => filesize($file),
+                'mtime' => filemtime($file),
+            ];
+        }
+
+        usort($out, fn ($a, $b) => $b['mtime'] <=> $a['mtime']);
+
+        return $out;
+    }
+
+    /** @return array<int, array<string, mixed>> parsed frames, oldest first */
+    protected static function load(string $name): array
+    {
+        $path = storage_path('app/edge-recordings/'.basename($name).'.jsonl');
+
+        abort_unless(is_file($path), 404);
+
+        $frames = [];
+
+        foreach (file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+            $decoded = json_decode($line, true);
+            if (is_array($decoded)) {
+                $frames[] = $decoded;
+            }
+        }
+
+        return $frames;
+    }
+
     public static function index()
     {
         $rows = '';
 
-        foreach (TreeRecorder::recordings() as $r) {
+        foreach (static::recordings() as $r) {
             $when = date('M j, H:i:s', $r['mtime']);
             $kb = round($r['bytes'] / 1024, 1);
             $rows .= "<a href=\"".\Native\Mobile\Edge\Web\Protocol\EdgeEndpoint::replayPath()."/{$r['name']}\" class=\"block px-5 py-4 rounded-xl bg-neutral-900 hover:bg-neutral-800 border border-neutral-800\">
@@ -34,7 +83,7 @@ class ReplayViewer
 
     public static function show(string $name)
     {
-        $frames = TreeRecorder::load($name);
+        $frames = static::load($name);
 
         // Pre-render every tree frame to HTML; carry events/nav through as
         // timeline entries. Times become offsets from the first frame.

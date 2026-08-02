@@ -93,7 +93,7 @@ class WebScreenRunner implements \Native\Mobile\Edge\Contracts\WebRunner
 
         $tree = $lazy ? static::placeholderTree($component) : static::renderTree($component);
 
-        \Native\Mobile\Edge\Recording\TreeRecorder::tree($tree, $path);
+        \Native\Mobile\Edge\TreeObservers::tree($tree, $path);
 
         $html = WebRenderer::render($tree);
         $title = static::title($component);
@@ -232,7 +232,7 @@ class WebScreenRunner implements \Native\Mobile\Edge\Contracts\WebRunner
         //     the render. A mount()-time navigation intent is honored by
         //     the intentResponse() check below, same as any dispatch.
         if ($eventType === 'poll' || $eventType === 'lazy') {
-            \Native\Mobile\Edge\Recording\TreeRecorder::event($event, $eventType);
+            \Native\Mobile\Edge\TreeObservers::event($event, $eventType);
 
             if ($eventType === 'poll') {
                 static::scoped($component, function () {
@@ -284,7 +284,7 @@ class WebScreenRunner implements \Native\Mobile\Edge\Contracts\WebRunner
 
                 return $cb['method'] ?? null;
             });
-            \Native\Mobile\Edge\Recording\TreeRecorder::event($event, $method);
+            \Native\Mobile\Edge\TreeObservers::event($event, $method);
 
             static::scoped($component, function () use ($event) {
                 /** @var NativeComponent $this */
@@ -293,14 +293,14 @@ class WebScreenRunner implements \Native\Mobile\Edge\Contracts\WebRunner
         }
 
         if ($response = static::intentResponse($component->getNavigationIntent(), true)) {
-            \Native\Mobile\Edge\Recording\TreeRecorder::nav($response->getData(true));
+            \Native\Mobile\Edge\TreeObservers::nav($response->getData(true));
 
             return $response;
         }
 
         $tree = static::renderTree($component);
 
-        \Native\Mobile\Edge\Recording\TreeRecorder::tree($tree, $path);
+        \Native\Mobile\Edge\TreeObservers::tree($tree, $path);
 
         return response()->json([
             'html' => WebRenderer::render($tree),
