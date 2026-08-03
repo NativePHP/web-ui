@@ -62,8 +62,14 @@ use Native\Mobile\Testing\FakeBridge;
  * no mount()) and the client immediately posts `{type: 'lazy'}` for the
  * real first frame — see update() for both string-typed events.
  */
-class WebScreenRunner implements \Native\Mobile\Edge\Contracts\WebRunner
+class WebScreenRunner implements \Native\Mobile\Edge\Contracts\NativeRouteFallback
 {
+    /** NativeRouteFallback: a browser GET on a native route renders the screen as HTML. */
+    public function handle(string $componentClass)
+    {
+        return $this->screen($componentClass);
+    }
+
     public function screen(string $componentClass)
     {
         $path = '/'.ltrim(request()->path(), '/');
@@ -323,7 +329,15 @@ class WebScreenRunner implements \Native\Mobile\Edge\Contracts\WebRunner
         // that pre-bound a plain FakeBridge stays in charge — its scripted
         // responses must keep intercepting.
         $bridge = FakeBridge::current() ?? WebBridge::enable();
-        NativeElementCollector::setWebMode(true);
+
+        // Web passthrough attributes, via core's generic capture registry:
+        // the raw class string (real Tailwind runs in the browser), raw
+        // inline style (runtime-computed values the build-time class scan
+        // can't see), and the web= icon name. Registering per boot is
+        // idempotent across reused workers.
+        NativeElementCollector::captureAttribute('class', 'web_class');
+        NativeElementCollector::captureAttribute('style', 'web_style');
+        NativeElementCollector::captureAttribute('web', 'web_icon');
 
         // Dev preview: `?_platform=mobile` makes @mobile/@web (System::
         // isMobile via Device.GetInfo) resolve as if on device, so the

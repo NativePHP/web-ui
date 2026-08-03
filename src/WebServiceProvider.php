@@ -4,7 +4,7 @@ namespace Native\Mobile\Edge\Web;
 
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\ServiceProvider;
-use Native\Mobile\Edge\Contracts\WebRunner;
+use Native\Mobile\Edge\Contracts\NativeRouteFallback;
 use Native\Mobile\Edge\Web\Replay\ReplayViewer;
 use Native\Mobile\Edge\Web\Bridge\WebBridge;
 use Native\Mobile\Edge\Web\Protocol\EdgeEndpoint;
@@ -12,13 +12,13 @@ use Native\Mobile\Edge\Web\Protocol\EdgeUpload;
 use Native\Mobile\Edge\Web\Protocol\WebScreenRunner;
 
 /**
- * Everything the web render target adds to the app: the WebRunner
+ * Everything the web render target adds to the app: the fallback
  * binding core dispatches through, the WebBridge, and the routes the
  * edge-web.js runtime talks to. Self-disables on device.
  *
  * This provider is the package-split seam made literal: when the web
  * feature moves to its own composer package, this file moves with it and
- * gets auto-discovered there — core keeps only the WebRunner contract
+ * gets auto-discovered there — core keeps only the NativeRouteFallback contract
  * and stops registering this provider itself.
  */
 class WebServiceProvider extends ServiceProvider
@@ -35,9 +35,9 @@ class WebServiceProvider extends ServiceProvider
             return;
         }
 
-        // The contract the Route::native fallthrough and the update
-        // route dispatch through.
-        $this->app->singleton(WebRunner::class, WebScreenRunner::class);
+        // A browser GET on a native route resolves this contract — the
+        // web target IS the app's fallback for off-runtime requests.
+        $this->app->singleton(NativeRouteFallback::class, WebScreenRunner::class);
 
         // Web bridge: resolving WebBridge from the container yields the
         // per-request instance (enabling one if the screen runner hasn't
@@ -66,7 +66,7 @@ class WebServiceProvider extends ServiceProvider
         // embeds the real path in #edge-state for the client runtime.
         $edgePrefix = EdgeEndpoint::prefix();
 
-        Route::post($edgePrefix.'/update', [WebRunner::class, 'update'])
+        Route::post($edgePrefix.'/update', [WebScreenRunner::class, 'update'])
             ->middleware('web')
             ->name('edge.web.update');
 
