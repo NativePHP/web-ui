@@ -466,6 +466,20 @@ class WebRenderer
             $field = "<input type=\"{$inputType}\"{$common} value=\"".static::e($p['value'] ?? '')."\" class=\"{$inputCls}\">";
         }
 
+        // The bare variant is chromeless BY CONTRACT on every target
+        // ("No outline. No fill. No label. No supporting text." — the
+        // native renderers' docblock): no label/supporting slots here
+        // either, so validation errors on bare inputs are the author's
+        // to place (@error / @nativeError). is_error still tints the
+        // text, matching native's cursor/text tint.
+        if ($type === 'bare_text_input') {
+            $bare = ! empty($p['is_error'])
+                ? preg_replace('/text-theme-on-surface(?!-)/', 'text-theme-destructive', $field, 1)
+                : $field;
+
+            return '<label class="flex flex-col '.(! empty($p['disabled']) ? 'opacity-60 ' : '').static::webClass($node).'">'.$bare.'</label>';
+        }
+
         $label = isset($p['label']) && $p['label'] !== ''
             ? '<span class="text-sm font-medium '.(! empty($p['is_error']) ? 'text-theme-destructive' : 'text-theme-on-surface-variant').'">'.static::e($p['label']).'</span>'
             : '';
