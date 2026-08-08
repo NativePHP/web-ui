@@ -44,6 +44,7 @@ class WebTheme
     /**
      * Resolve a `font="..."` token (alias or file basename) to a CSS
      * font-family name — the file basename, which is what the generated
+     *
      * @font-face rules declare. Null for none/System (browser default).
      */
     public static function resolveFont(?string $token): ?string

@@ -5,11 +5,12 @@ namespace Native\Mobile\Edge\Web;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\ServiceProvider;
 use Native\Mobile\Edge\Contracts\NativeRouteFallback;
-use Native\Mobile\Edge\Web\Replay\ReplayViewer;
 use Native\Mobile\Edge\Web\Bridge\WebBridge;
 use Native\Mobile\Edge\Web\Protocol\EdgeEndpoint;
 use Native\Mobile\Edge\Web\Protocol\EdgeUpload;
 use Native\Mobile\Edge\Web\Protocol\WebScreenRunner;
+use Native\Mobile\Edge\Web\Renderer\WebRenderer;
+use Native\Mobile\Edge\Web\Replay\ReplayViewer;
 
 /**
  * Everything the web render target adds to the app: the fallback
@@ -62,7 +63,7 @@ class WebServiceProvider extends ServiceProvider
 
         // Local-file image srcs → signed serving URLs (see the file
         // route below). Wired here so the renderer stays transport-free.
-        \Native\Mobile\Edge\Web\Renderer\WebRenderer::setLocalSrcResolver(
+        WebRenderer::setLocalSrcResolver(
             fn (string $path) => EdgeUpload::fileUrl($path),
         );
 

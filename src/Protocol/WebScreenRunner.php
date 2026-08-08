@@ -3,13 +3,17 @@
 namespace Native\Mobile\Edge\Web\Protocol;
 
 use Illuminate\Http\Request;
+use Illuminate\View\View;
 use Native\Mobile\Edge\CallbackRegistry;
+use Native\Mobile\Edge\Contracts\NativeRouteFallback;
 use Native\Mobile\Edge\NativeComponent;
 use Native\Mobile\Edge\NativeElementCollector;
 use Native\Mobile\Edge\NativeRouter;
 use Native\Mobile\Edge\NavigationIntent;
+use Native\Mobile\Edge\TreeObservers;
 use Native\Mobile\Edge\Web\Bridge\WebBridge;
 use Native\Mobile\Edge\Web\Renderer\WebRenderer;
+use Native\Mobile\Platform;
 use Native\Mobile\Testing\FakeBridge;
 
 /**
@@ -62,7 +66,7 @@ use Native\Mobile\Testing\FakeBridge;
  * no mount()) and the client immediately posts `{type: 'lazy'}` for the
  * real first frame — see update() for both string-typed events.
  */
-class WebScreenRunner implements \Native\Mobile\Edge\Contracts\NativeRouteFallback
+class WebScreenRunner implements NativeRouteFallback
 {
     /** NativeRouteFallback: a browser GET on a native route renders the screen as HTML. */
     public function handle(string $componentClass)
@@ -99,7 +103,7 @@ class WebScreenRunner implements \Native\Mobile\Edge\Contracts\NativeRouteFallba
 
         $tree = $lazy ? static::placeholderTree($component) : static::renderTree($component);
 
-        \Native\Mobile\Edge\TreeObservers::tree($tree, $path);
+        TreeObservers::tree($tree, $path);
 
         $html = WebRenderer::render($tree);
         $title = static::title($component);
@@ -243,7 +247,7 @@ class WebScreenRunner implements \Native\Mobile\Edge\Contracts\NativeRouteFallba
         //     the render. A mount()-time navigation intent is honored by
         //     the intentResponse() check below, same as any dispatch.
         if ($eventType === 'poll' || $eventType === 'lazy') {
-            \Native\Mobile\Edge\TreeObservers::event($event, $eventType);
+            TreeObservers::event($event, $eventType);
 
             if ($eventType === 'poll') {
                 static::scoped($component, function () {
@@ -272,7 +276,7 @@ class WebScreenRunner implements \Native\Mobile\Edge\Contracts\NativeRouteFallba
             $name = (string) ($event['event'] ?? '');
             $payload = EdgeUpload::resolvePayloadPaths((array) ($event['payload'] ?? []));
 
-            \Native\Mobile\Edge\TreeObservers::event($event, $name !== '' ? $name : null);
+            TreeObservers::event($event, $name !== '' ? $name : null);
 
             if ($name !== '') {
                 static::scoped($component, function () use ($name, $payload) {
@@ -320,7 +324,7 @@ class WebScreenRunner implements \Native\Mobile\Edge\Contracts\NativeRouteFallba
 
                 return $cb['method'] ?? null;
             });
-            \Native\Mobile\Edge\TreeObservers::event($event, $method);
+            TreeObservers::event($event, $method);
 
             static::scoped($component, function () use ($event) {
                 /** @var NativeComponent $this */
@@ -329,14 +333,14 @@ class WebScreenRunner implements \Native\Mobile\Edge\Contracts\NativeRouteFallba
         }
 
         if ($response = static::intentResponse($component->getNavigationIntent(), true)) {
-            \Native\Mobile\Edge\TreeObservers::nav($response->getData(true));
+            TreeObservers::nav($response->getData(true));
 
             return $response;
         }
 
         $tree = static::renderTree($component);
 
-        \Native\Mobile\Edge\TreeObservers::tree($tree, $path);
+        TreeObservers::tree($tree, $path);
 
         return response()->json([
             'html' => WebRenderer::render($tree),
@@ -384,7 +388,7 @@ class WebScreenRunner implements \Native\Mobile\Edge\Contracts\NativeRouteFallba
         // they match the Material Symbols web font, so `:android` icon enums
         // render on web for free. (`ios:`/`android:` Tailwind variants are
         // unknown to browser Tailwind and drop out harmlessly.)
-        \Native\Mobile\Platform::set(\Native\Mobile\Platform::ANDROID);
+        Platform::set(Platform::ANDROID);
 
         /** @var NativeComponent $component */
         $component = new $componentClass;
@@ -494,7 +498,7 @@ class WebScreenRunner implements \Native\Mobile\Edge\Contracts\NativeRouteFallba
             $this->resetComputedCache();
 
             $result = $this->placeholder();
-            $element = $result instanceof \Illuminate\View\View
+            $element = $result instanceof View
                 ? $this->fromView($result)
                 : $result;
 

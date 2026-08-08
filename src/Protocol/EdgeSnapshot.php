@@ -3,7 +3,10 @@
 namespace Native\Mobile\Edge\Web\Protocol;
 
 use BackedEnum;
+use Carbon\Carbon;
+use Carbon\CarbonImmutable;
 use DateTimeInterface;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Collection;
 use Native\Mobile\Attributes\Locked;
 
@@ -34,8 +37,8 @@ class EdgeSnapshot
      * from payload data — hydration must not construct arbitrary classes.
      */
     protected const DATETIME_CLASSES = [
-        \Carbon\Carbon::class,
-        \Carbon\CarbonImmutable::class,
+        Carbon::class,
+        CarbonImmutable::class,
         \Illuminate\Support\Carbon::class,
         \DateTimeImmutable::class,
         \DateTime::class,
@@ -168,8 +171,8 @@ class EdgeSnapshot
             ];
         }
 
-        if (class_exists(\Illuminate\Database\Eloquent\Model::class)
-            && $value instanceof \Illuminate\Database\Eloquent\Model) {
+        if (class_exists(Model::class)
+            && $value instanceof Model) {
             return static::dehydrateModel($value, $prop);
         }
 
@@ -226,7 +229,7 @@ class EdgeSnapshot
 
     // ── Eloquent models (key + refetch, Livewire-style) ─────
 
-    protected static function dehydrateModel(\Illuminate\Database\Eloquent\Model $model, string $prop): array
+    protected static function dehydrateModel(Model $model, string $prop): array
     {
         if (! $model->exists) {
             throw new \RuntimeException(
@@ -269,7 +272,7 @@ class EdgeSnapshot
      * deleted between requests throws with a clear message rather than
      * leaving a typed property in an impossible state.
      */
-    protected static function hydrateModel(array $marker): \Illuminate\Database\Eloquent\Model
+    protected static function hydrateModel(array $marker): Model
     {
         $class = static::modelClass($marker);
         $key = $marker['key'] ?? null;
@@ -311,13 +314,13 @@ class EdgeSnapshot
         return $ordered;
     }
 
-    /** @return class-string<\Illuminate\Database\Eloquent\Model> */
+    /** @return class-string<Model> */
     protected static function modelClass(array $marker): string
     {
         $class = $marker['class'] ?? null;
 
         if (! is_string($class) || ! class_exists($class)
-            || ! is_subclass_of($class, \Illuminate\Database\Eloquent\Model::class)) {
+            || ! is_subclass_of($class, Model::class)) {
             throw new \RuntimeException('Snapshot model marker does not reference an Eloquent model class.');
         }
 
