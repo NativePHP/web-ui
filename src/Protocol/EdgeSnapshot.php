@@ -129,11 +129,17 @@ class EdgeSnapshot
      *   DateTimeInterface   {__edge:'datetime', class, iso}   (class is the
      *                       nearest DATETIME_CLASSES entry, so subclasses
      *                       round-trip to their allowlisted parent)
+     *   Eloquent\Model      {__edge:'model', class, key}      (key only —
+     *                       attributes NEVER travel: no hidden-attribute
+     *                       leak, and hydrate() refetches fresh from the
+     *                       DB, so unsaved changes don't survive a request)
+     *   Eloquent\Collection {__edge:'models', class, keys}    (homogeneous;
+     *                       one whereKey query on the way back, original
+     *                       order preserved, deleted rows dropped)
      *   Support\Collection  {__edge:'collection', items}
      *
-     * Eloquent models (and any other object) throw: silently serializing
-     * a model onto the wire would leak hidden attributes and desync from
-     * the DB, so it's an explicit "not yet" instead.
+     * Anything else throws — an explicit "not supported" beats silently
+     * serializing an object the next request can't faithfully rebuild.
      */
     public static function dehydrate(mixed $value, string $prop): mixed
     {
@@ -164,9 +170,15 @@ class EdgeSnapshot
 
         if (class_exists(\Illuminate\Database\Eloquent\Model::class)
             && $value instanceof \Illuminate\Database\Eloquent\Model) {
-            throw new \RuntimeException(
-                "Public property \${$prop} is an Eloquent model; not yet supported on the web target — store the key and refetch, or mark it #[Locked]"
-            );
+            return static::dehydrateModel($value, $prop);
+        }
+
+        // Checked BEFORE the Support\Collection branch (it's a subclass):
+        // a homogeneous model collection travels as one compact keys
+        // marker and rehydrates with a single whereKey query.
+        if (class_exists(\Illuminate\Database\Eloquent\Collection::class)
+            && $value instanceof \Illuminate\Database\Eloquent\Collection) {
+            return static::dehydrateModels($value, $prop);
         }
 
         if ($value instanceof Collection) {
@@ -174,7 +186,7 @@ class EdgeSnapshot
         }
 
         throw new \RuntimeException(
-            "Public property \${$prop} holds a ".get_class($value).' instance; the web snapshot supports scalars, arrays, backed enums, datetimes and Collections.'
+            "Public property \${$prop} holds a ".get_class($value).' instance; the web snapshot supports scalars, arrays, backed enums, datetimes, Eloquent models and Collections.'
         );
     }
 
@@ -205,9 +217,111 @@ class EdgeSnapshot
         return match ($tag) {
             'enum' => static::hydrateEnum($value),
             'datetime' => static::hydrateDatetime($value),
+            'model' => static::hydrateModel($value),
+            'models' => static::hydrateModels($value),
             'collection' => new Collection(static::hydrate((array) ($value['items'] ?? []))),
             default => throw new \RuntimeException("Unknown snapshot value tag '{$tag}'."),
         };
+    }
+
+    // ── Eloquent models (key + refetch, Livewire-style) ─────
+
+    protected static function dehydrateModel(\Illuminate\Database\Eloquent\Model $model, string $prop): array
+    {
+        if (! $model->exists) {
+            throw new \RuntimeException(
+                "Public property \${$prop} holds an unsaved ".get_class($model).'; only persisted models can cross the web snapshot (save it first, or keep the raw attributes in an array prop).'
+            );
+        }
+
+        return ['__edge' => 'model', 'class' => get_class($model), 'key' => $model->getKey()];
+    }
+
+    protected static function dehydrateModels(\Illuminate\Database\Eloquent\Collection $models, string $prop): array
+    {
+        if ($models->isEmpty()) {
+            return ['__edge' => 'models', 'class' => null, 'keys' => []];
+        }
+
+        $classes = $models->map(fn ($m) => get_class($m))->unique();
+
+        if ($classes->count() > 1) {
+            throw new \RuntimeException(
+                "Public property \${$prop} holds a mixed-class Eloquent collection ({$classes->implode(', ')}); the web snapshot only round-trips homogeneous model collections."
+            );
+        }
+
+        foreach ($models as $model) {
+            if (! $model->exists) {
+                throw new \RuntimeException(
+                    "Public property \${$prop} contains an unsaved ".get_class($model).'; only persisted models can cross the web snapshot.'
+                );
+            }
+        }
+
+        return ['__edge' => 'models', 'class' => $classes->first(), 'keys' => array_values($models->modelKeys())];
+    }
+
+    /**
+     * Refetch a model by class + key. The class check (must be a Model
+     * subclass) is defense in depth like the other markers — the HMAC
+     * seal already guarantees the marker is server-authored. A row
+     * deleted between requests throws with a clear message rather than
+     * leaving a typed property in an impossible state.
+     */
+    protected static function hydrateModel(array $marker): \Illuminate\Database\Eloquent\Model
+    {
+        $class = static::modelClass($marker);
+        $key = $marker['key'] ?? null;
+
+        $model = $class::query()->find($key);
+
+        if ($model === null) {
+            throw new \RuntimeException("Snapshot model {$class}#{$key} no longer exists.");
+        }
+
+        return $model;
+    }
+
+    /**
+     * Refetch a homogeneous model collection in one query, preserving
+     * the dehydrated order. Rows deleted between requests are dropped
+     * silently — for a list that's the behavior you want (the item is
+     * simply gone on the next frame).
+     */
+    protected static function hydrateModels(array $marker): \Illuminate\Database\Eloquent\Collection
+    {
+        $keys = array_values((array) ($marker['keys'] ?? []));
+
+        if ($marker['class'] === null || $keys === []) {
+            return new \Illuminate\Database\Eloquent\Collection;
+        }
+
+        $class = static::modelClass($marker);
+
+        $byKey = $class::query()->findMany($keys)->keyBy(fn ($m) => (string) $m->getKey());
+
+        $ordered = new \Illuminate\Database\Eloquent\Collection;
+        foreach ($keys as $key) {
+            if (($model = $byKey->get((string) $key)) !== null) {
+                $ordered->push($model);
+            }
+        }
+
+        return $ordered;
+    }
+
+    /** @return class-string<\Illuminate\Database\Eloquent\Model> */
+    protected static function modelClass(array $marker): string
+    {
+        $class = $marker['class'] ?? null;
+
+        if (! is_string($class) || ! class_exists($class)
+            || ! is_subclass_of($class, \Illuminate\Database\Eloquent\Model::class)) {
+            throw new \RuntimeException('Snapshot model marker does not reference an Eloquent model class.');
+        }
+
+        return $class;
     }
 
     protected static function hydrateEnum(array $marker): ?BackedEnum

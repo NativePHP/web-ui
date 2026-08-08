@@ -27,7 +27,8 @@ package changes nothing about the native app.
 - `src/Replay/` — time-travel viewer for recorded tree sessions
   (`TreeRecorder` itself lives in core; devices record too).
 - `resources/js/edge-web.js` — client runtime: keyed DOM morph, event
-  queue, SPA nav, effects, polls, lazy boot, uploads.
+  queue, SPA nav, effects, polls, lazy boot, uploads, virtual-list
+  windowing, overlay focus trap/Escape/scroll-lock, error overlay.
 
 ## Installing in an app
 

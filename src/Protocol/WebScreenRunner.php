@@ -188,6 +188,11 @@ class WebScreenRunner implements \Native\Mobile\Edge\Contracts\NativeRouteFallba
 
         static::applySnapshot($component, $props);
 
+        // Restore the validation bag the last frame sealed — dispatch may
+        // then mutate it (validate() clears/replaces, sync auto-validation
+        // updates one key) before the re-render captures it again.
+        $component->setErrorBag((array) ($data['errors'] ?? []));
+
         // Rebuild the SCREEN's callback registry from the wire maps — no
         // render frame needed. Ids are content-addressed (fnv1a32 of the
         // expression), so re-registering each expression reproduces the
@@ -248,6 +253,31 @@ class WebScreenRunner implements \Native\Mobile\Edge\Contracts\NativeRouteFallba
                             $this->{$def['method']}();
                         }
                     }
+                });
+            }
+        } elseif ($eventType === 'native_event') {
+            // Result-return path for client effect drivers (geolocation,
+            // camera, dialog buttons, …): edge-web.js performed a browser
+            // API and reports the outcome as the native event the Pending*
+            // builder named — routed to #[OnNative] listeners exactly like
+            // the device event loop's EVENT_NATIVE branch, then falls
+            // through to the single render below.
+            //
+            // The payload is CLIENT-AUTHORED: listeners must treat its
+            // fields with form-input trust. File paths get more than
+            // trust: resolvePayloadPaths() rewrites {path, signature}
+            // pairs to verified absolute temp paths (device parity — a
+            // listener reads a real path on both targets) and nulls any
+            // path the HMAC doesn't vouch for.
+            $name = (string) ($event['event'] ?? '');
+            $payload = EdgeUpload::resolvePayloadPaths((array) ($event['payload'] ?? []));
+
+            \Native\Mobile\Edge\TreeObservers::event($event, $name !== '' ? $name : null);
+
+            if ($name !== '') {
+                static::scoped($component, function () use ($name, $payload) {
+                    /** @var NativeComponent $this */
+                    $this->dispatchNativeEvent(['event' => $name, 'payload' => $payload]);
                 });
             }
         } else {
@@ -507,6 +537,9 @@ class WebScreenRunner implements \Native\Mobile\Edge\Contracts\NativeRouteFallba
      *      nav:       list     (navigation configs, screen + children;
      *                           keys recomputed content-addressed by
      *                           registerNavigation),
+     *      errors:    object   (validation bag, {prop: [messages]} —
+     *                           restored via setErrorBag() before
+     *                           dispatch on the next update),
      *    }, checksum: hex}
      *
      * Registry maps are captured AFTER the render — which is exactly why
@@ -588,6 +621,11 @@ class WebScreenRunner implements \Native\Mobile\Edge\Contracts\NativeRouteFallba
             'callbacks' => $callbacks,
             'childCallbacks' => $childCallbacks,
             'nav' => $nav,
+            // Validation error bag ({prop: [messages]}): the web target's
+            // stand-in for the device's persistent instance keeping its
+            // bag between events. Sealed like everything else, so a
+            // client can neither forge nor clear errors.
+            'errors' => $component->getErrorBag()->messages(),
         ]);
     }
 
@@ -612,6 +650,7 @@ class WebScreenRunner implements \Native\Mobile\Edge\Contracts\NativeRouteFallba
             'callbacks' => [],
             'childCallbacks' => [],
             'nav' => [],
+            'errors' => [],
         ]);
     }
 

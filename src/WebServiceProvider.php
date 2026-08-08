@@ -60,6 +60,37 @@ class WebServiceProvider extends ServiceProvider
             $this->commands([Console\EdgeCssCommand::class]);
         }
 
+        // Local-file image srcs → signed serving URLs (see the file
+        // route below). Wired here so the renderer stays transport-free.
+        \Native\Mobile\Edge\Web\Renderer\WebRenderer::setLocalSrcResolver(
+            fn (string $path) => EdgeUpload::fileUrl($path),
+        );
+
+        // The same Laravel disks core registers on device
+        // (NativeServiceProvider::registerFilesystems, gated on the
+        // native runtime), mapped to their web-sensible roots — so
+        // `Storage::disk('mobile_public')` / `disk('temp')` is
+        // target-identical author code. `temp` points at edge-tmp:
+        // that's where picked/uploaded files land on this target, the
+        // role the native tempdir plays on device. Both roots live
+        // under storage/app, so `->path()` results render as images
+        // via the signed file route.
+        config([
+            'filesystems.disks.mobile_public' => config('filesystems.disks.mobile_public', [
+                'driver' => 'local',
+                'root' => storage_path('app/public'),
+                'url' => config('app.url').'/storage',
+                'visibility' => 'public',
+                'throw' => false,
+                'report' => false,
+            ]),
+            'filesystems.disks.temp' => config('filesystems.disks.temp', [
+                'driver' => 'local',
+                'root' => storage_path('app/'.EdgeUpload::DIRECTORY),
+                'throw' => false,
+            ]),
+        ]);
+
         // Per-installation paths (APP_KEY-derived, Livewire v4-style):
         // a unique prefix per app instead of a well-known endpoint, so
         // universal scanners can't target the update route. The page
@@ -94,6 +125,23 @@ class WebServiceProvider extends ServiceProvider
                 'Cache-Control' => 'public, max-age=86400',
             ]);
         })->where('file', '[^/]+')->name('edge.web.font');
+
+        // Serve signed local files (storage/app only): the web half of
+        // `<native:image :src="$absolutePath">` — WebRenderer rewrites
+        // local paths to these URLs so the same author code renders on
+        // both targets. HMAC-gated; see EdgeUpload::fileUrl().
+        Route::get($edgePrefix.'/file', function () {
+            $path = (string) request()->query('p', '');
+            $sig = (string) request()->query('s', '');
+
+            $real = EdgeUpload::validateFileUrl($path, $sig);
+
+            abort_if($real === null, 404);
+
+            return response()->file($real, [
+                'Cache-Control' => 'private, max-age=3600',
+            ]);
+        })->name('edge.web.file');
 
         // POC time-travel replay viewer for recorded sessions.
         Route::get($edgePrefix.'/replay', [ReplayViewer::class, 'index'])

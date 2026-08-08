@@ -76,12 +76,7 @@ class WebRenderer
             'list' => static::list($node, $p, $ctx),
             'list_section' => static::listSection($node, $p, $ctx),
             'list_item' => static::listItem($node, $p),
-            // Windowing stays server-driven (window_from/window_to props render
-            // only the live slice). The marker + scroll container are the seam
-            // for the JS follow-up.
-            // TODO(edge-web.js): observe scroll on [data-edge-virtual] and
-            // request window shifts (count/overscan/estimated_row_height props).
-            'virtual_list' => static::container($node, 'div', 'flex flex-col w-full overflow-y-auto', $ctx, ' data-edge-virtual'),
+            'virtual_list' => static::virtualList($node, $p, $ctx),
             'lazy_grid' => static::lazyGrid($node, $p, $ctx),
             'tab_row' => static::tabRow($node, $p, $ctx),
             'tab' => static::tab($node, $p, $ctx),
@@ -233,9 +228,37 @@ class WebRenderer
             : '';
     }
 
+    /**
+     * Rewrites a local-filesystem image src to something the browser can
+     * load. Injected by the transport layer (WebServiceProvider wires it
+     * to EdgeUpload::fileUrl — signed storage/app URLs); the renderer
+     * itself stays transport-free per the package layering rule. A future
+     * desktop shell might inject a file:// resolver instead.
+     *
+     * @var (callable(string): ?string)|null
+     */
+    protected static $localSrcResolver = null;
+
+    public static function setLocalSrcResolver(?callable $resolver): void
+    {
+        static::$localSrcResolver = $resolver;
+    }
+
     protected static function image(array $node, array $p): string
     {
-        $src = static::e($p['src'] ?? '');
+        $rawSrc = (string) ($p['src'] ?? '');
+
+        // Local-file srcs: native renderers load absolute device paths
+        // directly (`<native:image :src="$pickedPath">`), so the SAME
+        // author code on web gets the path rewritten through the
+        // injected resolver. Unresolvable local paths render as-is (a
+        // broken image beats a silent path leak).
+        if (static::$localSrcResolver !== null
+            && str_starts_with($rawSrc, '/') && ! str_starts_with($rawSrc, '//')) {
+            $rawSrc = (static::$localSrcResolver)($rawSrc) ?? $rawSrc;
+        }
+
+        $src = static::e($rawSrc);
         // alt falls back to the a11y label so icon-only/imagery pressables
         // keep an accessible name even without an explicit alt prop.
         $alt = static::e($p['alt'] ?? $p['a11y_label'] ?? '');
@@ -744,6 +767,52 @@ class WebRenderer
             .$leading.$textCol.$trailing."</{$tag}>";
     }
 
+    /**
+     * Windowed list (mobile-ui `<native:virtual-list>`). PHP emits only
+     * the rows inside [window_from..window_to]; native fills the
+     * off-window slots with fixed-height placeholders. Web mirrors that
+     * with two aggregate spacers sized estimated_row_height × the hidden
+     * row counts, so the scrollbar reflects the full list and scroll
+     * offsets map to absolute indices.
+     *
+     * The client (edge-web.js) watches scroll and requests window shifts
+     * through the on_window_change callback — a 'virtual_window'-kind
+     * callback riding the TEXT_CHANGE wire format with "from,to" as the
+     * text (see NativeComponent::dispatch()); the response re-renders
+     * the new slice and these spacers resize.
+     */
+    protected static function virtualList(array $node, array $p, array $ctx): string
+    {
+        $count = max(0, (int) ($p['count'] ?? count($node['children'] ?? [])));
+        $from = max(0, (int) ($p['window_from'] ?? 0));
+        $to = min(max($from, (int) ($p['window_to'] ?? max(0, $count - 1))), max(0, $count - 1));
+        $rowHeight = (float) ($p['estimated_row_height'] ?? 48);
+
+        $attrs = static::idAttr($node).' data-edge-virtual';
+
+        if (! empty($p['on_window_change'])) {
+            $attrs .= ' data-edge-vl-cb="'.((int) $p['on_window_change']).'"'
+                .' data-edge-vl-count="'.$count.'"'
+                .' data-edge-vl-window="'.$from.','.$to.'"'
+                .' data-edge-vl-row="'.$rowHeight.'"'
+                .(isset($p['overscan']) ? ' data-edge-vl-overscan="'.((int) $p['overscan']).'"' : '');
+        }
+
+        // Spacers are unkeyed on purpose: the morph's positional fallback
+        // reuses them and just patches the height style.
+        $spacer = function (int $rows) use ($rowHeight): string {
+            return $rows > 0
+                ? '<div aria-hidden="true" class="shrink-0" style="height:'.($rows * $rowHeight).'px"></div>'
+                : '';
+        };
+
+        return "<div{$attrs} class=\"".static::cls($node, 'flex flex-col w-full overflow-y-auto min-h-0').'">'
+            .$spacer($from)
+            .static::children($node, $ctx)
+            .$spacer($count > 0 ? $count - 1 - $to : 0)
+            .'</div>';
+    }
+
     protected static function lazyGrid(array $node, array $p, array $ctx): string
     {
         $cols = max(1, (int) ($p['columns'] ?? 2));
@@ -870,17 +939,24 @@ class WebRenderer
             ? ' data-edge-dismiss="'.((int) $p['on_dismiss']).'"'
             : '';
 
+        // The panel is the dialog: role/aria-modal for screen readers,
+        // tabindex="-1" so the client runtime can move focus into it when
+        // nothing inside is focusable. The wrapper stays the backdrop
+        // (and the data-edge-overlay hook the runtime's focus trap /
+        // Escape handling / scroll lock key off — see edge-web.js).
+        $dialog = ' role="dialog" aria-modal="true" tabindex="-1"';
+
         if ($sheet) {
-            $panel = '<div class="absolute inset-x-0 bottom-0 max-h-[85%] overflow-y-auto rounded-t-2xl bg-theme-surface shadow-2xl p-4 flex flex-col '.static::webClass($node).'">'
+            $panel = '<div'.$dialog.' class="absolute inset-x-0 bottom-0 max-h-[85%] overflow-y-auto rounded-t-2xl bg-theme-surface shadow-2xl p-4 flex flex-col '.static::webClass($node).'">'
                 .'<div class="self-center w-10 h-1 rounded-full bg-theme-outline-variant mb-3"></div>'
                 .static::children($node, $ctx).'</div>';
         } else {
-            $panel = '<div class="relative m-auto max-w-lg w-[90%] max-h-[85%] overflow-y-auto rounded-2xl bg-theme-surface shadow-2xl p-6 flex flex-col '.static::webClass($node).'">'
+            $panel = '<div'.$dialog.' class="relative m-auto max-w-lg w-[90%] max-h-[85%] overflow-y-auto rounded-2xl bg-theme-surface shadow-2xl p-6 flex flex-col '.static::webClass($node).'">'
                 .static::children($node, $ctx).'</div>';
         }
 
         return '<div'.static::idAttr($node).$dismiss
-            .' class="fixed inset-0 z-50 bg-black/40 flex">'
+            .' data-edge-overlay class="fixed inset-0 z-50 bg-black/40 flex">'
             .$panel.'</div>';
     }
 

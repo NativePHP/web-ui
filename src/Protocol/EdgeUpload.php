@@ -102,6 +102,96 @@ class EdgeUpload
         return hash_hmac('sha256', $path, static::key());
     }
 
+    // ── Local-file preview URLs (renderer support) ──────
+
+    /**
+     * Signed URL for serving a LOCAL file to the browser. This is what
+     * lets `<native:image :src="$absolutePath">` behave identically on
+     * both targets: native renderers load absolute file paths directly,
+     * and WebRenderer rewrites them to this URL (same file, served over
+     * HTTP with an HMAC nobody can forge).
+     *
+     * Only files under storage/app are signable — the natural home for
+     * both edge-tmp uploads and app-stored files, and a hard boundary so
+     * a screen that renders a user-influenced src can never be tricked
+     * into exposing something like the app's .env over HTTP.
+     */
+    public static function fileUrl(string $absolute): ?string
+    {
+        $real = realpath($absolute);
+
+        if ($real === false || ! static::withinStorageApp($real)) {
+            return null;
+        }
+
+        return EdgeEndpoint::prefix().'/file?p='.rawurlencode($real).'&s='.hash_hmac('sha256', 'file:'.$real, static::key());
+    }
+
+    /** Verify a {p, s} pair from the file route; absolute path or null. */
+    public static function validateFileUrl(string $absolute, string $signature): ?string
+    {
+        $real = realpath($absolute);
+
+        if ($real === false || ! static::withinStorageApp($real) || ! is_file($real)) {
+            return null;
+        }
+
+        return hash_equals(hash_hmac('sha256', 'file:'.$real, static::key()), $signature) ? $real : null;
+    }
+
+    protected static function withinStorageApp(string $real): bool
+    {
+        $root = realpath(storage_path('app'));
+
+        return $root !== false && str_starts_with($real, $root.DIRECTORY_SEPARATOR);
+    }
+
+    /**
+     * Normalize file paths inside a client-dispatched native-event
+     * payload so listeners receive the same thing they'd get on device:
+     * a real, readable filesystem path.
+     *
+     * Applies to the top-level payload and to each entry of a `files`
+     * list. The rule is strict, because native-event payloads are
+     * client-authored on web: a `path` key is ONLY honored when its
+     * sibling `signature` verifies against this endpoint's HMAC — then
+     * it's rewritten to the absolute temp path (signature consumed).
+     * Any other `path` (missing/invalid signature, cleaned-up file) is
+     * nulled, never passed through — a browser must not be able to point
+     * a listener at an arbitrary server path.
+     */
+    public static function resolvePayloadPaths(array $payload): array
+    {
+        $payload = static::resolveEntryPath($payload);
+
+        if (isset($payload['files']) && is_array($payload['files'])) {
+            $payload['files'] = array_map(
+                fn ($entry) => is_array($entry) ? static::resolveEntryPath($entry) : $entry,
+                $payload['files'],
+            );
+        }
+
+        return $payload;
+    }
+
+    /** One {path, signature} pair → verified absolute path or null. */
+    protected static function resolveEntryPath(array $entry): array
+    {
+        if (! array_key_exists('path', $entry)) {
+            return $entry;
+        }
+
+        $path = $entry['path'];
+        $signature = $entry['signature'] ?? null;
+        unset($entry['signature']);
+
+        $entry['path'] = (is_string($path) && is_string($signature))
+            ? static::validatePath($path, $signature)
+            : null;
+
+        return $entry;
+    }
+
     /** Store one file under a random name, preserving a safe extension. */
     protected static function storeFile(UploadedFile $file): array
     {

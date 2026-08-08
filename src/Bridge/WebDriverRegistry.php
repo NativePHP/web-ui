@@ -231,7 +231,52 @@ class WebDriverRegistry
             'Geolocation.GetCurrentPosition' => ClientEffect::make(),
             'Geolocation.CheckPermissions' => ClientEffect::make(),
             'Geolocation.RequestPermissions' => ClientEffect::make(),
+
+            // File facade: real filesystem ops (the native side does the
+            // same on device). Without these, File::move/copy on web hit
+            // the unhandled-method path — which answers null and made the
+            // facade REPORT success while doing nothing. Params come from
+            // author PHP code (never the browser), so no path fencing —
+            // same trust as on device.
+            'File.Move' => fn (array $params) => [
+                'success' => static::fileOp($params, rename(...)),
+            ],
+            'File.Copy' => fn (array $params) => [
+                'success' => static::fileOp($params, copy(...)),
+            ],
+
+            // Camera facade (core Pending* builders): browser file pickers
+            // standing in for the native camera/gallery. The client uploads
+            // picks through window.EdgeUpload and reports back by
+            // dispatching the builder's event ({id, event} ride the
+            // params); WebScreenRunner verifies the signed upload paths
+            // before the event reaches listeners.
+            'Camera.GetPhoto' => ClientEffect::make(),
+            'Camera.PickMedia' => ClientEffect::make(),
+            'Camera.RecordVideo' => ClientEffect::make(),
         ];
+    }
+
+    /** Shared File.Move/File.Copy body: validate, ensure the target dir, run the op. */
+    protected static function fileOp(array $params, callable $op): bool
+    {
+        $from = $params['from'] ?? null;
+        $to = $params['to'] ?? null;
+
+        if (! is_string($from) || ! is_string($to) || ! is_file($from)) {
+            return false;
+        }
+
+        $dir = dirname($to);
+        if (! is_dir($dir) && ! @mkdir($dir, 0755, true)) {
+            return false;
+        }
+
+        try {
+            return (bool) $op($from, $to);
+        } catch (\Throwable) {
+            return false;
+        }
     }
 
     /** Short human-readable browser/OS summary for Device.GetInfo. */

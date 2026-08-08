@@ -94,6 +94,104 @@
     return t;
   }
 
+  // ── Error overlay (failed updates) ──────────────────────────────────
+  // A failed /update deserves better than a toast: in debug mode Laravel
+  // answers JSON {message, exception, file, line, trace} (the client
+  // sends Accept: application/json), and proxies/servers may answer raw
+  // HTML (nginx 502/413 pages). Render whichever arrived in a dismissible
+  // overlay. One at a time — a failing poll timer must not stack them.
+
+  function showErrorOverlay(status, body) {
+    if (document.getElementById('edge-error-overlay')) return; // no stacking
+
+    let title = 'Update failed (HTTP ' + status + ')';
+    let content; // element appended into the panel
+
+    let parsed = null;
+    try { parsed = JSON.parse(body); } catch { /* not JSON */ }
+
+    if (parsed && typeof parsed === 'object') {
+      if (!parsed.exception && !parsed.trace) {
+        // Production-shaped JSON ({message}) — a toast is enough.
+        showToast(parsed.message || title, { error: true });
+        return;
+      }
+      // Debug payload: readable message + exception + trimmed trace.
+      if (parsed.message) title = parsed.message;
+      content = document.createElement('pre');
+      content.style.cssText =
+        'margin:0;padding:12px;overflow:auto;max-height:60vh;background:#1c1b1f;color:#e6e0e9;' +
+        'border-radius:8px;font:12px/1.6 ui-monospace,monospace;white-space:pre-wrap;word-break:break-word;';
+      const lines = [];
+      if (parsed.exception) lines.push(parsed.exception);
+      if (parsed.file) lines.push(parsed.file + ':' + parsed.line);
+      for (const frame of (Array.isArray(parsed.trace) ? parsed.trace.slice(0, 20) : [])) {
+        lines.push('  at ' + (frame.class ? frame.class + (frame.type || '::') : '') + (frame.function || '') +
+          (frame.file ? ' (' + frame.file + ':' + frame.line + ')' : ''));
+      }
+      content.textContent = lines.join('\n') || body;
+    } else if (typeof body === 'string' && body.trimStart().startsWith('<')) {
+      // HTML error page (server error page, proxy 502/413) — sandboxed iframe.
+      content = document.createElement('iframe');
+      content.setAttribute('sandbox', ''); // inert: no scripts, no navigation
+      content.style.cssText = 'width:100%;height:60vh;border:0;border-radius:8px;background:#fff;';
+      content.srcdoc = body;
+    } else {
+      showToast(title, { error: true });
+      return;
+    }
+
+    const overlay = document.createElement('div');
+    overlay.id = 'edge-error-overlay';
+    overlay.style.cssText =
+      'position:fixed;inset:0;z-index:2147482500;background:rgba(0,0,0,.6);' +
+      'display:flex;align-items:center;justify-content:center;padding:24px;';
+
+    const panel = document.createElement('div');
+    panel.setAttribute('role', 'alertdialog');
+    panel.setAttribute('aria-modal', 'true');
+    panel.setAttribute('aria-label', title);
+    panel.tabIndex = -1;
+    panel.style.cssText =
+      'background:#fff;color:#1c1b1f;border-radius:12px;width:100%;max-width:min(95vw,860px);' +
+      'padding:16px;font:14px/1.5 system-ui,sans-serif;box-shadow:0 8px 32px rgba(0,0,0,.35);' +
+      'display:flex;flex-direction:column;gap:12px;';
+
+    const head = document.createElement('div');
+    head.style.cssText = 'display:flex;align-items:flex-start;justify-content:space-between;gap:12px;';
+    const heading = document.createElement('div');
+    heading.style.cssText = 'font-weight:600;color:#b3261e;word-break:break-word;';
+    heading.textContent = title;
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.textContent = '×';
+    close.setAttribute('aria-label', 'Dismiss error');
+    close.style.cssText =
+      'background:none;border:0;font-size:22px;line-height:1;cursor:pointer;color:#444746;padding:0 4px;';
+
+    const restoreTo = document.activeElement;
+    const dismiss = () => {
+      document.removeEventListener('keydown', onKey, true);
+      overlay.remove();
+      if (restoreTo && restoreTo.isConnected && restoreTo.focus) restoreTo.focus({ preventScroll: true });
+    };
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopPropagation();
+      dismiss();
+    };
+    close.addEventListener('click', dismiss);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) dismiss(); });
+    document.addEventListener('keydown', onKey, true);
+
+    head.append(heading, close);
+    panel.append(head, content);
+    overlay.appendChild(panel);
+    document.body.appendChild(overlay);
+    panel.focus();
+  }
+
   // ── Keyed DOM morph ─────────────────────────────────────────────────
   // Reconciles the server's fresh HTML into the live tree, keyed on
   // data-edge-id (positional fallback for unkeyed nodes). Reuses nodes
@@ -215,7 +313,86 @@
         if (scroll) { el.scrollLeft = scroll[0]; el.scrollTop = scroll[1]; }
       }
     }
+
+    syncOverlays();
   }
+
+  // ── Overlay a11y (modal / bottom_sheet) ─────────────────────────────
+  // Rendered overlays carry data-edge-overlay on the backdrop and
+  // role="dialog" on the panel (WebRenderer::overlay). After every morph:
+  // move focus into a newly-opened dialog (remembering the trigger),
+  // restore focus when one closes, and lock page scroll while any is
+  // open. Keydown adds a Tab focus trap and Escape-to-dismiss (which
+  // fires the same SHEET_DISMISS callback as a backdrop click).
+
+  const FOCUSABLE =
+    'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), ' +
+    'textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+  /** data-edge-id → element to restore focus to when that overlay closes. */
+  const overlayReturnFocus = new Map();
+
+  function topOverlay() {
+    const r = root();
+    const all = r ? r.querySelectorAll('[data-edge-overlay]') : [];
+    return all.length ? all[all.length - 1] : null;
+  }
+
+  function syncOverlays() {
+    const r = root();
+    if (!r) return;
+
+    const present = new Set();
+    for (const ov of r.querySelectorAll('[data-edge-overlay]')) {
+      const key = ov.getAttribute('data-edge-id');
+      present.add(key);
+      if (overlayReturnFocus.has(key)) continue; // already open
+
+      // Newly opened: remember what had focus (usually the trigger
+      // button), then move focus inside the dialog.
+      overlayReturnFocus.set(key, document.activeElement);
+      const panel = ov.querySelector('[role="dialog"]') || ov;
+      const first = panel.querySelector(FOCUSABLE);
+      (first || panel).focus({ preventScroll: true });
+    }
+
+    for (const [key, el] of overlayReturnFocus) {
+      if (present.has(key)) continue;
+      overlayReturnFocus.delete(key);
+      if (el && el.isConnected && el.focus) el.focus({ preventScroll: true });
+    }
+
+    document.documentElement.style.overflow = present.size ? 'hidden' : '';
+  }
+
+  document.addEventListener('keydown', (e) => {
+    const ov = topOverlay();
+    if (!ov) return;
+    // The alert dialog and error overlay live outside #edge-root and
+    // handle their own keys — while one is up, leave Escape/Tab to it.
+    if (document.querySelector('[role="alertdialog"]')) return;
+
+    if (e.key === 'Escape') {
+      const cb = parseInt(ov.getAttribute('data-edge-dismiss') || '', 10);
+      if (cb) {
+        e.preventDefault();
+        enqueue({ type: EV.SHEET_DISMISS, callback_id: cb }, ov);
+      }
+    } else if (e.key === 'Tab') {
+      const focusables = ov.querySelectorAll(FOCUSABLE);
+      if (!focusables.length) { e.preventDefault(); return; }
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const active = document.activeElement;
+      if (e.shiftKey && (active === first || !ov.contains(active))) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && (active === last || !ov.contains(active))) {
+        e.preventDefault();
+        first.focus();
+      }
+    }
+  }, true);
 
   // ── Event queue ─────────────────────────────────────────────────────
   // One request in flight at a time; further events queue FIFO and flush
@@ -303,7 +480,9 @@
 
     if (!res.ok) {
       console.error('[edge] update failed', res.status);
-      showToast('Update failed (HTTP ' + res.status + ').', { error: true });
+      let body = '';
+      try { body = await res.text(); } catch { /* connection dropped mid-body */ }
+      showErrorOverlay(res.status, body);
       return;
     }
 
@@ -512,6 +691,49 @@
 
   const openUrl = async (p) => { if (p.url) window.open(p.url, '_blank', 'noopener'); };
 
+  /**
+   * Open the browser file picker via a hidden input. Resolves with the
+   * picked File[] — empty on cancel (the input `cancel` event, supported
+   * in evergreen browsers; where it never fires, the promise just stays
+   * pending until a pick, which is harmless for these flows). `capture`
+   * makes mobile browsers open the camera directly.
+   */
+  function pickFiles({ accept, multiple = false, capture = null }) {
+    return new Promise((resolve) => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      if (accept) input.accept = accept;
+      if (multiple) input.multiple = true;
+      if (capture) input.setAttribute('capture', capture);
+      input.style.display = 'none';
+      document.body.appendChild(input);
+
+      const settle = (files) => { input.remove(); resolve(files); };
+      input.addEventListener('change', () => settle(Array.from(input.files || [])));
+      input.addEventListener('cancel', () => settle([]));
+      input.click();
+    });
+  }
+
+  /** Shared driver body for single-file capture (photo / video). */
+  async function captureSingle(p, ctx, { accept, event, cancelEvent }) {
+    const picked = await pickFiles({ accept, capture: 'environment' });
+    if (!picked.length) {
+      ctx.dispatchNativeEvent(cancelEvent, { id: p.id ?? null });
+      return;
+    }
+
+    try {
+      const up = await window.EdgeUpload(picked[0]);
+      ctx.dispatchNativeEvent(event, {
+        path: up.path, signature: up.signature, mimeType: up.mime, id: p.id ?? null,
+      });
+    } catch (e) {
+      showToast(e.message || 'Upload failed', { error: true });
+      ctx.dispatchNativeEvent(cancelEvent, { id: p.id ?? null });
+    }
+  }
+
   const defaultDrivers = {
     'Dialog.Alert': (p) => showAlert(p),
 
@@ -579,6 +801,48 @@
       const state = navigator.geolocation ? await geoPermissionState() : 'denied';
       ctx.dispatchNativeEvent(p.event, geoPermissionPayload(state, p.id));
     },
+
+    // ── Camera facade (core Pending* builders) ──────────────────────
+    // Browser file pickers standing in for camera/gallery. Picks upload
+    // through window.EdgeUpload; the outcome is reported by dispatching
+    // the builder's event with {path, signature} descriptors the server
+    // verifies and rewrites to real temp paths before listeners run.
+
+    'Camera.PickMedia': async (p, ctx) => {
+      const event = p.event || 'Native\\Mobile\\Events\\Gallery\\MediaSelected';
+      const accept = p.mediaType === 'image' ? 'image/*'
+        : p.mediaType === 'video' ? 'video/*'
+        : 'image/*,video/*';
+
+      const picked = await pickFiles({ accept, multiple: !!p.multiple });
+      if (!picked.length) {
+        ctx.dispatchNativeEvent(event, { success: false, files: [], count: 0, cancelled: true, id: p.id ?? null });
+        return;
+      }
+
+      const max = Number(p.maxItems) > 0 ? Number(p.maxItems) : picked.length;
+      try {
+        const up = await window.EdgeUpload(picked.slice(0, max));
+        const files = (up.files || [up]).map((f) => ({
+          path: f.path, signature: f.signature, name: f.name, mimeType: f.mime, size: f.size,
+        }));
+        ctx.dispatchNativeEvent(event, { success: true, files, count: files.length, cancelled: false, id: p.id ?? null });
+      } catch (e) {
+        ctx.dispatchNativeEvent(event, { success: false, files: [], count: 0, error: e.message || 'Upload failed', cancelled: false, id: p.id ?? null });
+      }
+    },
+
+    'Camera.GetPhoto': (p, ctx) => captureSingle(p, ctx, {
+      accept: 'image/*',
+      event: p.event || 'Native\\Mobile\\Events\\Camera\\PhotoTaken',
+      cancelEvent: 'Native\\Mobile\\Events\\Camera\\PhotoCancelled',
+    }),
+
+    'Camera.RecordVideo': (p, ctx) => captureSingle(p, ctx, {
+      accept: 'video/*',
+      event: p.event || 'Native\\Mobile\\Events\\Camera\\VideoRecorded',
+      cancelEvent: 'Native\\Mobile\\Events\\Camera\\VideoCancelled',
+    }),
 
     'Geolocation.RequestPermissions': async (p, ctx) => {
       if (!p.event) return;
@@ -665,6 +929,55 @@
     if (!S.lazy) return;
     S.lazy = false;
     enqueue({ type: 'lazy' });
+  }
+
+  // ── Virtual list windowing ──────────────────────────────────────────
+  // Containers carry data-edge-vl-{cb,count,window,row,overscan} (see
+  // WebRenderer::virtualList). On scroll, compute the visible index range
+  // from scrollTop / estimated row height; when it drifts within half an
+  // overscan of the rendered window's edge, request a new window as a
+  // TEXT event ("from,to" — the 'virtual_window' callback kind server-
+  // side). Queue-level TEXT coalescing collapses rapid scrolling into
+  // the latest request; the response re-renders the slice and resizes
+  // the spacers, and the morph keeps the scroll position.
+
+  let vlRaf = 0;
+
+  document.addEventListener('scroll', (e) => {
+    const el = e.target;
+    if (!(el instanceof Element) || !el.matches('[data-edge-vl-cb]')) return;
+    if (vlRaf) return;
+    vlRaf = requestAnimationFrame(() => { vlRaf = 0; vlRequest(el); });
+  }, true); // scroll doesn't bubble — capture
+
+  function vlRequest(el) {
+    if (!el.isConnected) return;
+    const cbId = parseInt(el.dataset.edgeVlCb, 10);
+    const count = parseInt(el.dataset.edgeVlCount, 10) || 0;
+    if (!cbId || count <= 0) return;
+
+    const rowHeight = parseFloat(el.dataset.edgeVlRow) || 48;
+    const overscan = parseInt(el.dataset.edgeVlOverscan || '20', 10);
+    const cur = (el.dataset.edgeVlWindow || '').split(',');
+    const curFrom = parseInt(cur[0], 10) || 0;
+    const curTo = parseInt(cur[1], 10) || 0;
+
+    const firstVisible = Math.max(0, Math.floor(el.scrollTop / rowHeight));
+    const lastVisible = Math.min(count - 1, Math.ceil((el.scrollTop + el.clientHeight) / rowHeight));
+
+    // Hysteresis: only re-window once the viewport nears an edge of the
+    // rendered slice — an idle scroll inside the window stays silent.
+    const margin = Math.max(1, Math.floor(overscan / 2));
+    if (firstVisible - margin >= curFrom && lastVisible + margin <= curTo) return;
+
+    const from = Math.max(0, firstVisible - overscan);
+    const to = Math.min(count - 1, lastVisible + overscan);
+    if (from === curFrom && to === curTo) return;
+
+    // Optimistically record the requested window so a long in-flight
+    // update doesn't re-fire the same request every scroll frame.
+    el.dataset.edgeVlWindow = from + ',' + to;
+    enqueue({ type: EV.TEXT, callback_id: cbId, text: from + ',' + to }, el);
   }
 
   // ── Uploads (window.EdgeUpload) ─────────────────────────────────────
@@ -816,6 +1129,7 @@
 
   resetPolls();
   armLazy(); // #[Lazy] placeholder: fetch the real content immediately
+  syncOverlays(); // the initial GET may render an already-visible overlay
   runEffects(S.effects); // effects queued during the initial GET render
 
   console.log('[edge] web runtime ready', S.component);
