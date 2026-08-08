@@ -193,6 +193,24 @@ WebRenderer both already pass unknown props through harmlessly).
   HTML; the morph patches them in. A future nicety (focus the first
   errored input after a failed submit) is a follow-up, not v1.
 
+## Styling errors (dev contract — Shane-confirmed 2026-08-08)
+
+The auto-injected display is a DEFAULT, never a cage. Guaranteed knobs,
+most custom first:
+
+1. `@error('field')` in Blade — arbitrary custom UI, any styling, any
+   placement; the injected display never interferes with it.
+2. Per-element suppression: author-set `supporting` (including `""`)
+   and `error` attrs beat injection via the extraProps merge order
+   (covered by the merge-order test). Control tint + custom-placed
+   message is a supported combination.
+3. Theme tokens (`destructive`, `on-surface-variant`) restyle the
+   built-in display app-wide; `@nativeError('field', '#hex')` per use.
+4. No markup at all → the consistent Material-style default.
+
+Any future change that breaks one of these layers is a regression, not
+a redesign.
+
 ## Decisions made here (flag if you disagree)
 
 1. Laravel's own `ValidationException` — not a custom one. Authors can
