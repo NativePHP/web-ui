@@ -204,10 +204,20 @@ screen — design item, not urgent:
 
 Each phase is shippable alone; tests ride core's suite as today.
 
-1. Validation core (`validate`, bag, exception handling, `$errors`) +
-   web snapshot carriage → then auto-wired input errors in mobile-ui.
-2. `TemporaryUpload` in core + `file_input` element + web driver wiring
-   → previews → progress.
-3. Cheap-wins batch (confirm, flash, loading-target, dirty).
-4. Form objects, then `#[Url]` + pagination once device semantics are
+1. ~~Validation core + web snapshot carriage + auto-wired input
+   errors~~ — DONE (core PRs #301/#302, tested).
+2. ~~Uploads via the existing Camera facade~~ — DONE (web drivers,
+   native_event seam, signed file serving, Storage/File parity).
+   Remaining: XHR upload progress.
+3. **Error-display audit** — DONE (2026-08-08). The premise that most
+   elements "already had" error slots was wrong: only TEXT inputs
+   displayed errors, on every target. Select/DatePicker/Checkbox/
+   RadioGroup now render is_error/supporting on iOS + Android + web and
+   accept the attrs in PHP (mobile-ui branch `feat/error-display-audit`,
+   unpushed; native halves NOT yet device-built — verify on a real
+   build). Slider/Toggle/Chip/ButtonGroup deliberately skipped: rarely
+   validated, same pattern applies when needed.
+4. Cheap-wins batch (flash, loading-target, dirty; confirm demoted to
+   backlog — it's four lines of userland Dialog code).
+5. Form objects, then `#[Url]` + pagination once device semantics are
    agreed.
