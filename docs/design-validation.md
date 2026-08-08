@@ -8,9 +8,10 @@ Status: **draft for review** — nothing built. Companion to
 
 - `$this->validate()` in a handler behaves like every Laravel dev
   expects, **identically on device and web**.
-- Inline errors on inputs with zero extra markup (better than Livewire,
-  because our inputs have structured error slots — `is_error` /
-  `supporting` — where HTML has loose DOM).
+- Error display fully in the author's hands (Livewire semantics):
+  nothing renders without `@error`/`@nativeError` markup or explicit
+  `error`/`supporting` attributes. Elements that display errors do it
+  through structured slots (`is_error`/`supporting` wire props).
 - `$errors` available in Blade, shaped like Laravel's `ViewErrorBag`, so
   `@error('email')` muscle memory works.
 - Real-time (per-keystroke) validation with no new wire machinery —
@@ -159,27 +160,34 @@ already present**. Centralize in one `viewData()` helper since the merge
 is currently copy-pasted across ~5 sites. Child components inject their
 OWN bag into their own views — error scope = component instance.
 
-### 5. Auto-wiring errors into bound inputs
+### 5. Error display is EXPLICIT-ONLY (revised 2026-08-08, Shane's call)
 
-Two-part mechanism, both generic (no per-element code):
+Originally this design auto-injected `is_error` + the first message as
+`supporting` onto `native:model`-bound elements. That was REMOVED: the
+Livewire model — nothing renders until the author says so — is what
+devs know, and the injected default locked in presentation (the control
+tint wasn't even cleanly suppressible; `:error="false"` parses as
+absent) and forced `supporting=""` tricks on anyone with custom error
+UI.
 
-1. **Precompiler** (`compileNativeModel()`): also emit
-   `model-prop="<name>"` so every `native:model`-bound element carries
-   its property name into the collector. (One line; the attribute is
-   also independently useful — e.g. future devtools.)
-2. **Collector/render**: when an element carries `model_prop` and the
-   active component's bag has errors for that key, inject
-   `is_error: true` and `supporting: <first message>` into its props.
-   Author-provided `is_error`/`supporting` win (explicit beats
-   injected); while errored, the injected message REPLACES an
-   author-default supporting text (decision from the parity map).
+What the author writes is what appears:
 
-Because injection happens at the wire-tree level, it works for core
-inputs, mobile-ui inputs, and any plugin element that adopts the
-`is_error`/`supporting` prop convention — which this design promotes
-from "mobile-ui convention" to documented wire vocabulary. Elements
-that don't render those props simply ignore them (native registries and
-WebRenderer both already pass unknown props through harmlessly).
+- `@error('field') … @enderror` — arbitrary Blade, any styling, any
+  placement, on every target.
+- `@nativeError('field', '#hex')` — one-line message leaf.
+- `error` / `supporting` attributes on elements that display them
+  (text inputs + Select/DatePicker/Checkbox/RadioGroup since the
+  error-display audit) — the Material-style slot, opted into per
+  element:
+
+      <native:select native:model="color" :options="$colors"
+          :error="$errors->has('color')"
+          :supporting="$errors->first('color')" />
+
+`compileNativeModel()` still emits `model-prop` as metadata (stripped
+in the collector, drives nothing) for devtools/future targets. The
+`is_error`/`supporting` prop names remain the documented wire
+vocabulary for elements that render an error slot.
 
 ## Web-target carriage (this repo — deliberately small)
 
@@ -195,21 +203,18 @@ WebRenderer both already pass unknown props through harmlessly).
 
 ## Styling errors (dev contract — Shane-confirmed 2026-08-08)
 
-The auto-injected display is a DEFAULT, never a cage. Guaranteed knobs,
-most custom first:
+NOTHING renders without author markup — Livewire semantics, guaranteed:
 
-1. `@error('field')` in Blade — arbitrary custom UI, any styling, any
-   placement; the injected display never interferes with it.
-2. Per-element suppression: author-set `supporting` (including `""`)
-   and `error` attrs beat injection via the extraProps merge order
-   (covered by the merge-order test). Control tint + custom-placed
-   message is a supported combination.
-3. Theme tokens (`destructive`, `on-surface-variant`) restyle the
-   built-in display app-wide; `@nativeError('field', '#hex')` per use.
-4. No markup at all → the consistent Material-style default.
+1. A failed validation only records state (`$errors`, the bag); it
+   never changes any element's props or appearance.
+2. `@error('field')` renders arbitrary custom UI, any styling, any
+   placement, on every target.
+3. `error`/`supporting` attributes opt a displaying element into its
+   built-in Material-style slot; theme tokens (`destructive`,
+   `on-surface-variant`) restyle that app-wide.
 
-Any future change that breaks one of these layers is a regression, not
-a redesign.
+Any future change that breaks one of these layers — especially #1, the
+no-surprise-rendering rule — is a regression, not a redesign.
 
 ## Decisions made here (flag if you disagree)
 
@@ -219,7 +224,8 @@ a redesign.
 2. Attribute rules auto-validate on sync; `rules()` rules don't.
 3. Bag is internal state with dedicated snapshot carriage, not a public
    prop.
-4. Injection replaces `supporting` while errored; reverts when cleared.
+4. ~~Injection replaces `supporting` while errored~~ — SUPERSEDED:
+   there is no injection; display is explicit-only (section 5).
 5. `is_error`/`supporting`/`model_prop` become documented wire-level
    props, not mobile-ui-private ones.
 6. Error scope is the component instance (child components have their
@@ -243,7 +249,7 @@ Three PRs, independently shippable, in order:
 1. **core**: `ValidatesProps` trait + `#[Validate]` + guarded dispatch +
    `$errors` injection + `model-prop` emission + prop injection at the
    collector. Tests: unit (bag semantics, rule merging) + feature
-   (dispatch aborts, frame shows injected props, sync auto-validation,
+   (dispatch aborts, elements untouched on failure, sync auto-validation,
    child-component scoping).
 2. **mobile-web** (this repo): snapshot `errors` carriage + restore.
    Tests ride core's web suite (update cycle: failed validate → same

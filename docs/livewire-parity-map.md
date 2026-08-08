@@ -46,10 +46,12 @@ props, and the web renderer already styles them.
 - Real-time validation falls out for free: `updatedX()` hooks already
   fire on `native:model` sync — `updatedEmail() { $this->validateOnly('email'); }`.
 
-**Core render-time auto-wiring (the nice-to-have that sells it):** when
-an input's `native:model` prop has an error, inject `is_error` +
-`supporting` (first message) into the element automatically. Authors get
-inline errors with zero markup; explicit props still win.
+**~~Core render-time auto-wiring~~ — built, then REMOVED (2026-08-08,
+Shane's call):** the Livewire model is what devs know. Nothing renders
+without explicit `@error`/`@nativeError` markup or `error`/`supporting`
+attributes; a failed validation never touches an element's props. See
+design-validation.md §5 for the reasoning (locked-in presentation,
+un-suppressible tint).
 
 **Web (small):** carry the error bag in the sealed snapshot so errors
 survive *unrelated* subsequent updates (Livewire persists them too;
@@ -204,7 +206,7 @@ screen — design item, not urgent:
 
 Each phase is shippable alone; tests ride core's suite as today.
 
-1. ~~Validation core + web snapshot carriage + auto-wired input
+1. ~~Validation core + web snapshot carriage + explicit-only error display
    errors~~ — DONE (core PRs #301/#302, tested).
 2. ~~Uploads via the existing Camera facade~~ — DONE (web drivers,
    native_event seam, signed file serving, Storage/File parity).
