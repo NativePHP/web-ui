@@ -217,6 +217,28 @@ for *runtime-computed* values like `style="width: {{ $battery }}%"`. Why not
 your *source files* for class names at build time — a class generated at
 runtime would never be in the compiled sheet. Inline styles sidestep that.
 
+### The Tailwind build: `php artisan edge:css`
+
+Two modes, decided by one file's existence:
+
+- **No built sheet** (`public/vendor/edge/app.css` absent): the page
+  loads the Tailwind browser CDN and JIT-compiles classes live. Every
+  class always works; there's an external CDN dependency and a runtime
+  compile cost. This is the right mode for local development.
+- **Built sheet present**: `php artisan edge:css` scans the app's
+  source for class names and compiles a static stylesheet (theme
+  tokens included); the shell serves it with an mtime cache-buster and
+  skips the CDN entirely. This is the production mode.
+
+**The trap**: the built sheet is a snapshot. Add a new Tailwind class
+to a blade afterwards and the markup is right but the CSS rule doesn't
+exist — the element renders silently unstyled (the class attribute is
+there, so string-matching tests still pass). Nothing warns you.
+**Re-run `edge:css` after view or theme changes, or delete the built
+sheet during development** to stay on the JIT. Same reason
+runtime-computed values need `style=""` (`web_style`) instead of
+interpolated classes: the build-time scan can never see them.
+
 ### Theming
 
 Emitters never hardcode colors. They use `bg-theme-primary`,
@@ -618,6 +640,10 @@ if (class_exists(HtmlRendererRegistry::class)) {
 - Dynamic Tailwind classes built at runtime (`w-[{{ $x }}%]`) won't exist
   in a production `edge:css` build — use `style=""` (`web_style`) for
   runtime-computed values.
+- A STATIC class added after the last `edge:css` run is just as invisible:
+  the built sheet is a snapshot, and a missing rule fails silently (markup
+  right, paint wrong). Re-run the build after view changes, or delete
+  `public/vendor/edge/app.css` in development to use the live JIT.
 - Bracket values are **dp-style unitless** (`w-[300]` → `300px`); don't
   write `w-[300px]` in shared Blade or the native parser will choke on it.
 - Public props must be scalars, arrays, backed enums, datetimes,
