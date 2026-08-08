@@ -502,12 +502,20 @@ class WebRenderer
             .(! empty($p['on_change']) ? ' data-edge-checkbox="'.((int) $p['on_change']).'"' : '')
             .(! empty($p['value']) ? ' checked' : '')
             .(! empty($p['disabled']) ? ' disabled' : '')
-            .' class="w-5 h-5 accent-theme-primary">';
+            .' class="w-5 h-5 '.(! empty($p['is_error']) ? 'accent-theme-destructive outline outline-1 outline-theme-destructive rounded-sm ' : 'accent-theme-primary').'">';
 
-        return '<label class="inline-flex items-center gap-3 cursor-pointer '.(! empty($p['disabled']) ? 'opacity-60 cursor-default ' : '').static::webClass($node).'">'
-            .$input
-            .(isset($p['label']) ? '<span>'.static::e($p['label']).'</span>' : '')
-            .'</label>';
+        $supporting = static::fieldSupporting($p);
+        $rowClass = 'inline-flex items-center gap-3 cursor-pointer '.(! empty($p['disabled']) ? 'opacity-60 cursor-default ' : '');
+        $labelSpan = isset($p['label']) ? '<span>'.static::e($p['label']).'</span>' : '';
+
+        // No supporting text: keep the historical single-label shape.
+        if ($supporting === '') {
+            return '<label class="'.$rowClass.static::webClass($node).'">'.$input.$labelSpan.'</label>';
+        }
+
+        return '<span class="inline-flex flex-col gap-1 '.static::webClass($node).'">'
+            .'<label class="'.$rowClass.'">'.$input.$labelSpan.'</label>'
+            .$supporting.'</span>';
     }
 
     protected static function switchControl(array $node, array $p, string $dataAttr, int $cbId): string
@@ -563,14 +571,27 @@ class WebRenderer
         $field = '<select'.static::idAttr($node)
             .(! empty($p['on_change']) ? ' data-edge-select="'.((int) $p['on_change']).'"' : '')
             .(! empty($p['disabled']) ? ' disabled' : '')
-            .' class="border border-theme-outline rounded-lg px-3 py-2.5 bg-theme-surface text-theme-on-surface w-full outline-none focus:border-theme-primary disabled:opacity-50">'
+            .' class="border '.(! empty($p['is_error']) ? 'border-theme-destructive' : 'border-theme-outline').' rounded-lg px-3 py-2.5 bg-theme-surface text-theme-on-surface w-full outline-none focus:border-theme-primary disabled:opacity-50">'
             .$options.'</select>';
 
-        $label = isset($p['label']) && $p['label'] !== ''
-            ? '<span class="text-sm font-medium text-theme-on-surface-variant">'.static::e($p['label']).'</span>'
-            : '';
+        return '<label class="flex flex-col gap-1 '.static::webClass($node).'">'
+            .static::fieldLabel($p).$field.static::fieldSupporting($p).'</label>';
+    }
 
-        return '<label class="flex flex-col gap-1 '.static::webClass($node).'">'.$label.$field.'</label>';
+    /** Shared label span for labeled form controls (error-tinted). */
+    protected static function fieldLabel(array $p): string
+    {
+        return isset($p['label']) && $p['label'] !== ''
+            ? '<span class="text-sm font-medium '.(! empty($p['is_error']) ? 'text-theme-destructive' : 'text-theme-on-surface-variant').'">'.static::e($p['label']).'</span>'
+            : '';
+    }
+
+    /** Shared supporting-text span (error-tinted) — the validation display slot. */
+    protected static function fieldSupporting(array $p): string
+    {
+        return isset($p['supporting']) && $p['supporting'] !== ''
+            ? '<span class="text-xs '.(! empty($p['is_error']) ? 'text-theme-destructive' : 'text-theme-on-surface-variant').'">'.static::e($p['supporting']).'</span>'
+            : '';
     }
 
     protected static function datePicker(array $node, array $p): string
@@ -587,13 +608,10 @@ class WebRenderer
             .(isset($p['min']) ? ' min="'.static::e($p['min']).'"' : '')
             .(isset($p['max']) ? ' max="'.static::e($p['max']).'"' : '')
             .(! empty($p['disabled']) ? ' disabled' : '')
-            .' class="border border-theme-outline rounded-lg px-3 py-2 bg-theme-surface text-theme-on-surface outline-none focus:border-theme-primary disabled:opacity-50">';
+            .' class="border '.(! empty($p['is_error']) ? 'border-theme-destructive' : 'border-theme-outline').' rounded-lg px-3 py-2 bg-theme-surface text-theme-on-surface outline-none focus:border-theme-primary disabled:opacity-50">';
 
-        $label = isset($p['label']) && $p['label'] !== ''
-            ? '<span class="text-sm font-medium text-theme-on-surface-variant">'.static::e($p['label']).'</span>'
-            : '';
-
-        return '<label class="flex flex-col gap-1 '.static::webClass($node).'">'.$label.$field.'</label>';
+        return '<label class="flex flex-col gap-1 '.static::webClass($node).'">'
+            .static::fieldLabel($p).$field.static::fieldSupporting($p).'</label>';
     }
 
     protected static function radioGroup(array $node, array $p, array $ctx): string
@@ -604,16 +622,12 @@ class WebRenderer
             'value' => (string) ($p['value'] ?? ''),
         ];
 
-        $label = isset($p['label']) && $p['label'] !== ''
-            ? '<span class="text-sm font-medium text-theme-on-surface-variant">'.static::e($p['label']).'</span>'
-            : '';
-
         // A disabled <fieldset> natively disables every radio inside it —
         // the group-level `disabled` prop needs no per-child plumbing.
         return '<fieldset'.static::idAttr($node)
             .(! empty($p['disabled']) ? ' disabled' : '')
             .' class="flex flex-col gap-2 '.(! empty($p['disabled']) ? 'opacity-60 ' : '').static::webClass($node).'">'
-            .$label.static::children($node, $ctx).'</fieldset>';
+            .static::fieldLabel($p).static::children($node, $ctx).static::fieldSupporting($p).'</fieldset>';
     }
 
     protected static function radio(array $node, array $p, array $ctx): string
