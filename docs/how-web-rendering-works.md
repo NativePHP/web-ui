@@ -572,6 +572,23 @@ store (file/redis — not `array`).
   `SHEET_DISMISS` callback as a backdrop click — but only when the
   overlay is dismissible.
 
+- **Loading, dirty, and upload-progress affordances** (pure client,
+  zero wire changes):
+  - `<html data-edge-busy="<callbackId>">` while an update is in
+    flight — the id lets CSS target *which* action is loading
+    (`html[data-edge-busy="123"] .save-spinner { … }`); the origin
+    element still gets `disabled`/`data-edge-loading`.
+  - `data-edge-dirty` on any form control whose live value differs from
+    the last server-rendered one (compared against the `default*`
+    properties). Self-cleaning: the morph strips it on every server
+    sync, because a synced value *is* the server value again.
+  - Upload progress: `EdgeUpload(file, { onProgress })` plus an
+    `edge-upload-progress` CustomEvent on `document`
+    (`{loaded, total, percent}`) and `data-edge-uploading` on `<html>`
+    for pure-CSS progress affordances. `EdgeUpload` now rides XHR (the
+    one thing fetch still can't do); its resolve/reject contract is
+    unchanged.
+
 - **Uploads.** `window.EdgeUpload(fileOrList)` POSTs multipart to the
   upload endpoint; files land in `storage/app/edge-tmp` and come back as
   HMAC-signed `{path, signature}` pairs that server code re-verifies via

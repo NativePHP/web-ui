@@ -219,7 +219,14 @@ Each phase is shippable alone; tests ride core's suite as today.
    unpushed; native halves NOT yet device-built — verify on a real
    build). Slider/Toggle/Chip/ButtonGroup deliberately skipped: rarely
    validated, same pattern applies when needed.
-4. Cheap-wins batch (flash, loading-target, dirty; confirm demoted to
-   backlog — it's four lines of userland Dialog code).
+4. Cheap-wins batch — web-side trio DONE (2026-08-08, branch
+   `feat/web-cheap-wins` stacked on phase 1): per-action loading
+   (`data-edge-busy` carries the callback id), dirty tracking
+   (`data-edge-dirty`, morph-self-cleaning), and XHR upload progress
+   (`onProgress` + `edge-upload-progress` event + `data-edge-uploading`).
+   Browser-behavior features — verified by syntax + contract harnesses;
+   a visual browser pass is still owed. FLASH deferred: it needs core,
+   and core is frozen for review (#301/#302 awaiting Simon). Confirm
+   stays demoted to backlog.
 5. Form objects, then `#[Url]` + pagination once device semantics are
    agreed.

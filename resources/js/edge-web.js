@@ -404,8 +404,11 @@
   const queue = [];
   let inFlight = false;
 
-  const setBusy = (on) => on
-    ? document.documentElement.setAttribute('data-edge-busy', '')
+  // data-edge-busy carries the in-flight callback id (or protocol event
+  // type), so CSS can target WHICH action is loading:
+  //   html[data-edge-busy="12345"] .save-spinner { display: block }
+  const setBusy = (job) => job
+    ? document.documentElement.setAttribute('data-edge-busy', String(job.event.callback_id ?? job.event.type ?? ''))
     : document.documentElement.removeAttribute('data-edge-busy');
 
   /** Never hard-disable typing surfaces mid-edit — it would blur them. */
@@ -424,10 +427,10 @@
   async function drain() {
     if (inFlight) return;
     const job = queue.shift();
-    if (!job) { setBusy(false); return; }
+    if (!job) { setBusy(null); return; }
 
     inFlight = true;
-    setBusy(true);
+    setBusy(job);
 
     const el = job.origin;
     const disable = !!(el && el.tagName === 'BUTTON' && !el.disabled);
@@ -993,38 +996,70 @@
   // 413 oversize (possibly nginx HTML before PHP — hence res.ok, not
   // JSON, decides).
 
-  window.EdgeUpload = async function edgeUpload(file) {
-    if (!S.uploadEndpoint) throw new Error('EdgeUpload: no uploadEndpoint in state');
+  // XHR rather than fetch for the one thing fetch still can't do:
+  // upload progress. Progress surfaces three ways — an onProgress
+  // callback in opts, an 'edge-upload-progress' CustomEvent on document
+  // ({loaded, total, percent} in detail), and data-edge-uploading on
+  // <html> for pure-CSS affordances. Resolve/reject contract unchanged:
+  // resolves the server payload; rejects Error{status, message}.
+  window.EdgeUpload = function edgeUpload(file, opts) {
+    if (!S.uploadEndpoint) return Promise.reject(new Error('EdgeUpload: no uploadEndpoint in state'));
 
     const files = (typeof FileList !== 'undefined' && file instanceof FileList)
       ? Array.from(file)
       : (Array.isArray(file) ? file : [file]);
     if (!files.length || files.some((f) => !(f instanceof Blob))) {
-      throw new Error('EdgeUpload: expected a File/Blob or a list of them');
+      return Promise.reject(new Error('EdgeUpload: expected a File/Blob or a list of them'));
     }
 
     const fd = new FormData();
     if (files.length === 1) fd.append('file', files[0]);
     else files.forEach((f) => fd.append('files[]', f));
 
-    const res = await fetch(S.uploadEndpoint, {
-      method: 'POST',
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', S.uploadEndpoint);
       // NO Content-Type — the browser must set the multipart boundary.
-      headers: { 'X-CSRF-TOKEN': S.csrf, 'Accept': 'application/json' },
-      body: fd, // session cookie rides along (same-origin default)
-    });
+      xhr.setRequestHeader('X-CSRF-TOKEN', S.csrf);
+      xhr.setRequestHeader('Accept', 'application/json');
+      xhr.responseType = 'json';
 
-    if (!res.ok) {
-      let message = 'Upload failed (HTTP ' + res.status + ')';
-      try {
-        const err = await res.json();
-        if (err && err.message) message = err.message;
-      } catch { /* non-JSON error body (e.g. nginx 413 page) */ }
-      const e = new Error(message);
-      e.status = res.status;
-      throw e;
-    }
-    return res.json();
+      document.documentElement.setAttribute('data-edge-uploading', '');
+      const settle = () => document.documentElement.removeAttribute('data-edge-uploading');
+
+      xhr.upload.addEventListener('progress', (e) => {
+        if (!e.lengthComputable) return;
+        const detail = { loaded: e.loaded, total: e.total, percent: Math.round((e.loaded / e.total) * 100) };
+        if (opts && typeof opts.onProgress === 'function') {
+          try { opts.onProgress(detail); } catch { /* consumer's problem */ }
+        }
+        document.dispatchEvent(new CustomEvent('edge-upload-progress', { detail }));
+      });
+
+      xhr.addEventListener('load', () => {
+        settle();
+        const body = xhr.response;
+        if (xhr.status >= 200 && xhr.status < 300 && body) {
+          resolve(body);
+          return;
+        }
+        // Non-JSON error body (e.g. an nginx 413 page) → generic message.
+        const e = new Error((body && body.message) || 'Upload failed (HTTP ' + xhr.status + ')');
+        e.status = xhr.status;
+        reject(e);
+      });
+
+      const fail = (message) => () => {
+        settle();
+        const e = new Error(message);
+        e.status = 0;
+        reject(e);
+      };
+      xhr.addEventListener('error', fail('Upload failed (network)'));
+      xhr.addEventListener('abort', fail('Upload aborted'));
+
+      xhr.send(fd); // session cookie rides along (same-origin default)
+    });
   };
 
   // ── DOM event delegation ────────────────────────────────────────────
@@ -1124,6 +1159,31 @@
       enqueue({ type: EV.PRESS, callback_id: cb(el, 'edgePress') }, el);
     }
   });
+
+  // ── Dirty tracking ──────────────────────────────────────────────────
+  // data-edge-dirty marks a form control whose live value differs from
+  // the last server-rendered one (default* properties reflect the
+  // rendered attributes). Style with [data-edge-dirty]. Self-cleaning:
+  // the morph strips the attribute on every server sync — a synced
+  // value IS the server value again.
+
+  function refreshDirty(el) {
+    if (!el || !el.matches || !el.matches('input, textarea, select')) return;
+
+    let dirty;
+    if (el.type === 'checkbox' || el.type === 'radio') {
+      dirty = el.checked !== el.defaultChecked;
+    } else if (el.tagName === 'SELECT') {
+      dirty = Array.from(el.options).some((o) => o.selected !== o.defaultSelected);
+    } else {
+      dirty = el.value !== el.defaultValue;
+    }
+
+    el.toggleAttribute('data-edge-dirty', dirty);
+  }
+
+  document.addEventListener('input', (e) => refreshDirty(e.target));
+  document.addEventListener('change', (e) => refreshDirty(e.target));
 
   // ── Boot ────────────────────────────────────────────────────────────
 
