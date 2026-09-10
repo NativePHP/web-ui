@@ -3,9 +3,10 @@
 namespace Native\Mobile\Edge\Web\Console;
 
 use Illuminate\Console\Command;
-use Native\Mobile\Edge\Web\Replay\ReplayViewer;
-use Native\Mobile\Edge\Web\Renderer\WebRenderer;
 use Native\Mobile\Edge\Web\Protocol\WebShell;
+use Native\Mobile\Edge\Web\Renderer\WebRenderer;
+use Native\Mobile\Edge\Web\Replay\ReplayViewer;
+use Symfony\Component\Process\Exception\ExceptionInterface;
 use Symfony\Component\Process\ExecutableFinder;
 use Symfony\Component\Process\Process;
 
@@ -103,7 +104,7 @@ class EdgeCssCommand extends Command
 
         try {
             $process->run(fn ($type, $buffer) => $this->output->write($buffer));
-        } catch (\Symfony\Component\Process\Exception\ExceptionInterface $e) {
+        } catch (ExceptionInterface $e) {
             $this->error('Failed to run the Tailwind CLI: '.$e->getMessage());
             $this->line('Make sure Node.js and npm are installed and working (`npx --version`), then re-run:');
             $this->line('  php artisan edge:css');
@@ -166,7 +167,7 @@ class EdgeCssCommand extends Command
 
         try {
             $process->run(fn ($type, $buffer) => $this->output->write($buffer));
-        } catch (\Symfony\Component\Process\Exception\ExceptionInterface $e) {
+        } catch (ExceptionInterface $e) {
             $this->error('npm install failed to start: '.$e->getMessage());
 
             return false;

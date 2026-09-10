@@ -2,6 +2,7 @@
 
 namespace Native\Mobile\Edge\Web\Bridge;
 
+use Native\Mobile\Contracts\GatedBridge;
 use Native\Mobile\Testing\FakeBridge;
 
 /**
@@ -35,7 +36,7 @@ use Native\Mobile\Testing\FakeBridge;
  * WebScreenRunner::boot() enables one per request; the instance is also
  * aliased under FakeBridge::class so the global polyfills find it.
  */
-class WebBridge extends FakeBridge implements \Native\Mobile\Contracts\GatedBridge
+class WebBridge extends FakeBridge implements GatedBridge
 {
     /**
      * Client effects queued this request, oldest first.

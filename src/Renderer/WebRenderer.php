@@ -62,7 +62,7 @@ class WebRenderer
             'image' => static::image($node, $p),
             'icon' => static::icon($node, $p),
             'pressable' => static::container($node, 'button', 'flex flex-col appearance-none text-left cursor-pointer', $ctx, ' type="button"'),
-            'button' => static::button($node, $p),
+            'button' => static::button($node, $p, $ctx),
             'outlined_text_input', 'filled_text_input', 'bare_text_input', 'text_input' => static::textInput($node, $p, $type),
             'toggle' => static::toggle($node, $p),
             'checkbox' => static::checkbox($node, $p),
@@ -76,12 +76,7 @@ class WebRenderer
             'list' => static::list($node, $p, $ctx),
             'list_section' => static::listSection($node, $p, $ctx),
             'list_item' => static::listItem($node, $p),
-            // Windowing stays server-driven (window_from/window_to props render
-            // only the live slice). The marker + scroll container are the seam
-            // for the JS follow-up.
-            // TODO(edge-web.js): observe scroll on [data-edge-virtual] and
-            // request window shifts (count/overscan/estimated_row_height props).
-            'virtual_list' => static::container($node, 'div', 'flex flex-col w-full overflow-y-auto', $ctx, ' data-edge-virtual'),
+            'virtual_list' => static::virtualList($node, $p, $ctx),
             'lazy_grid' => static::lazyGrid($node, $p, $ctx),
             'tab_row' => static::tabRow($node, $p, $ctx),
             'tab' => static::tab($node, $p, $ctx),
@@ -116,8 +111,16 @@ class WebRenderer
 
     protected static function container(array $node, string $tag, string $base, array $ctx, string $extra = ''): string
     {
-        $isButton = $tag === 'button';
-        $attrs = static::idAttr($node).static::pressAttrs($node, $isButton).static::styleAttr($node).$extra;
+        // A press that is a plain navigation renders as a real anchor:
+        // crawlable, open-in-new-tab friendly, and still SPA-navigated by
+        // the runtime (see linkAttrs()).
+        if (($href = static::linkHref($node, $ctx)) !== null) {
+            $tag = 'a';
+            $attrs = static::idAttr($node).static::linkAttrs($href).static::styleAttr($node);
+        } else {
+            $isButton = $tag === 'button';
+            $attrs = static::idAttr($node).static::pressAttrs($node, $isButton).static::styleAttr($node).$extra;
+        }
 
         return "<{$tag}{$attrs} class=\"".static::cls($node, $base).'">'
             .static::children($node, $ctx)
@@ -211,7 +214,6 @@ class WebRenderer
 
     protected static function text(array $node, array $p, array $ctx): string
     {
-        $attrs = static::idAttr($node).static::pressAttrs($node, false).static::fontAttr($p);
         $class = static::cls($node, '');
 
         // Inline runs: a <text> with children composes ordered spans.
@@ -219,6 +221,15 @@ class WebRenderer
         foreach ($node['children'] ?? [] as $run) {
             $inner .= static::text($run, $run['props'] ?? [], $ctx);
         }
+
+        // Navigation presses become inline anchors (see container()).
+        if (($href = static::linkHref($node, $ctx)) !== null) {
+            $attrs = static::idAttr($node).static::linkAttrs($href).static::fontAttr($p);
+
+            return "<a{$attrs} class=\"{$class}\">{$inner}</a>";
+        }
+
+        $attrs = static::idAttr($node).static::pressAttrs($node, false).static::fontAttr($p);
 
         return "<span{$attrs} class=\"{$class}\">{$inner}</span>";
     }
@@ -233,9 +244,37 @@ class WebRenderer
             : '';
     }
 
+    /**
+     * Rewrites a local-filesystem image src to something the browser can
+     * load. Injected by the transport layer (WebServiceProvider wires it
+     * to EdgeUpload::fileUrl — signed storage/app URLs); the renderer
+     * itself stays transport-free per the package layering rule. A future
+     * desktop shell might inject a file:// resolver instead.
+     *
+     * @var (callable(string): ?string)|null
+     */
+    protected static $localSrcResolver = null;
+
+    public static function setLocalSrcResolver(?callable $resolver): void
+    {
+        static::$localSrcResolver = $resolver;
+    }
+
     protected static function image(array $node, array $p): string
     {
-        $src = static::e($p['src'] ?? '');
+        $rawSrc = (string) ($p['src'] ?? '');
+
+        // Local-file srcs: native renderers load absolute device paths
+        // directly (`<native:image :src="$pickedPath">`), so the SAME
+        // author code on web gets the path rewritten through the
+        // injected resolver. Unresolvable local paths render as-is (a
+        // broken image beats a silent path leak).
+        if (static::$localSrcResolver !== null
+            && str_starts_with($rawSrc, '/') && ! str_starts_with($rawSrc, '//')) {
+            $rawSrc = (static::$localSrcResolver)($rawSrc) ?? $rawSrc;
+        }
+
+        $src = static::e($rawSrc);
         // alt falls back to the a11y label so icon-only/imagery pressables
         // keep an accessible name even without an explicit alt prop.
         $alt = static::e($p['alt'] ?? $p['a11y_label'] ?? '');
@@ -330,7 +369,7 @@ class WebRenderer
 
     // ── Inputs & controls ───────────────────────────
 
-    protected static function button(array $node, array $p): string
+    protected static function button(array $node, array $p, array $ctx = []): string
     {
         $variant = $p['variant'] ?? 'primary';
         $size = $p['size'] ?? 'md';
@@ -361,11 +400,21 @@ class WebRenderer
             $inner .= '<span class="material-symbols-outlined text-[20px] leading-none">'.static::e(static::materialName($p['trailing_icon'])).'</span>';
         }
 
+        $class = 'inline-flex items-center justify-center gap-2 font-medium cursor-pointer select-none '
+            .'disabled:opacity-50 disabled:cursor-default active:opacity-80 '
+            .$variantCls.' '.$sizeCls.' '.static::webClass($node);
+
+        // An enabled button whose press is a plain navigation is a styled
+        // anchor (see container()); a disabled one stays a real <button>,
+        // since anchors cannot be disabled.
+        if (! $disabled && ($href = static::linkHref($node, $ctx)) !== null) {
+            return '<a'.static::idAttr($node).static::linkAttrs($href).static::fontAttr($p)
+                .' role="button" class="'.$class.'">'.$inner.'</a>';
+        }
+
         return '<button type="button"'.static::idAttr($node).static::pressAttrs($node, true).static::fontAttr($p)
             .($disabled ? ' disabled' : '')
-            .' class="inline-flex items-center justify-center gap-2 font-medium cursor-pointer select-none '
-            .'disabled:opacity-50 disabled:cursor-default active:opacity-80 '
-            .$variantCls.' '.$sizeCls.' '.static::webClass($node).'">'
+            .' class="'.$class.'">'
             .$inner.'</button>';
     }
 
@@ -443,6 +492,20 @@ class WebRenderer
             $field = "<input type=\"{$inputType}\"{$common} value=\"".static::e($p['value'] ?? '')."\" class=\"{$inputCls}\">";
         }
 
+        // The bare variant is chromeless BY CONTRACT on every target
+        // ("No outline. No fill. No label. No supporting text." — the
+        // native renderers' docblock): no label/supporting slots here
+        // either, so validation errors on bare inputs are the author's
+        // to place (@error / @nativeError). is_error still tints the
+        // text, matching native's cursor/text tint.
+        if ($type === 'bare_text_input') {
+            $bare = ! empty($p['is_error'])
+                ? preg_replace('/text-theme-on-surface(?!-)/', 'text-theme-destructive', $field, 1)
+                : $field;
+
+            return '<label class="flex flex-col '.(! empty($p['disabled']) ? 'opacity-60 ' : '').static::webClass($node).'">'.$bare.'</label>';
+        }
+
         $label = isset($p['label']) && $p['label'] !== ''
             ? '<span class="text-sm font-medium '.(! empty($p['is_error']) ? 'text-theme-destructive' : 'text-theme-on-surface-variant').'">'.static::e($p['label']).'</span>'
             : '';
@@ -465,12 +528,20 @@ class WebRenderer
             .(! empty($p['on_change']) ? ' data-edge-checkbox="'.((int) $p['on_change']).'"' : '')
             .(! empty($p['value']) ? ' checked' : '')
             .(! empty($p['disabled']) ? ' disabled' : '')
-            .' class="w-5 h-5 accent-theme-primary">';
+            .' class="w-5 h-5 '.(! empty($p['is_error']) ? 'accent-theme-destructive outline outline-1 outline-theme-destructive rounded-sm ' : 'accent-theme-primary').'">';
 
-        return '<label class="inline-flex items-center gap-3 cursor-pointer '.(! empty($p['disabled']) ? 'opacity-60 cursor-default ' : '').static::webClass($node).'">'
-            .$input
-            .(isset($p['label']) ? '<span>'.static::e($p['label']).'</span>' : '')
-            .'</label>';
+        $supporting = static::fieldSupporting($p);
+        $rowClass = 'inline-flex items-center gap-3 cursor-pointer '.(! empty($p['disabled']) ? 'opacity-60 cursor-default ' : '');
+        $labelSpan = isset($p['label']) ? '<span>'.static::e($p['label']).'</span>' : '';
+
+        // No supporting text: keep the historical single-label shape.
+        if ($supporting === '') {
+            return '<label class="'.$rowClass.static::webClass($node).'">'.$input.$labelSpan.'</label>';
+        }
+
+        return '<span class="inline-flex flex-col gap-1 '.static::webClass($node).'">'
+            .'<label class="'.$rowClass.'">'.$input.$labelSpan.'</label>'
+            .$supporting.'</span>';
     }
 
     protected static function switchControl(array $node, array $p, string $dataAttr, int $cbId): string
@@ -526,14 +597,27 @@ class WebRenderer
         $field = '<select'.static::idAttr($node)
             .(! empty($p['on_change']) ? ' data-edge-select="'.((int) $p['on_change']).'"' : '')
             .(! empty($p['disabled']) ? ' disabled' : '')
-            .' class="border border-theme-outline rounded-lg px-3 py-2.5 bg-theme-surface text-theme-on-surface w-full outline-none focus:border-theme-primary disabled:opacity-50">'
+            .' class="border '.(! empty($p['is_error']) ? 'border-theme-destructive' : 'border-theme-outline').' rounded-lg px-3 py-2.5 bg-theme-surface text-theme-on-surface w-full outline-none focus:border-theme-primary disabled:opacity-50">'
             .$options.'</select>';
 
-        $label = isset($p['label']) && $p['label'] !== ''
-            ? '<span class="text-sm font-medium text-theme-on-surface-variant">'.static::e($p['label']).'</span>'
-            : '';
+        return '<label class="flex flex-col gap-1 '.static::webClass($node).'">'
+            .static::fieldLabel($p).$field.static::fieldSupporting($p).'</label>';
+    }
 
-        return '<label class="flex flex-col gap-1 '.static::webClass($node).'">'.$label.$field.'</label>';
+    /** Shared label span for labeled form controls (error-tinted). */
+    protected static function fieldLabel(array $p): string
+    {
+        return isset($p['label']) && $p['label'] !== ''
+            ? '<span class="text-sm font-medium '.(! empty($p['is_error']) ? 'text-theme-destructive' : 'text-theme-on-surface-variant').'">'.static::e($p['label']).'</span>'
+            : '';
+    }
+
+    /** Shared supporting-text span (error-tinted) — the validation display slot. */
+    protected static function fieldSupporting(array $p): string
+    {
+        return isset($p['supporting']) && $p['supporting'] !== ''
+            ? '<span class="text-xs '.(! empty($p['is_error']) ? 'text-theme-destructive' : 'text-theme-on-surface-variant').'">'.static::e($p['supporting']).'</span>'
+            : '';
     }
 
     protected static function datePicker(array $node, array $p): string
@@ -550,13 +634,10 @@ class WebRenderer
             .(isset($p['min']) ? ' min="'.static::e($p['min']).'"' : '')
             .(isset($p['max']) ? ' max="'.static::e($p['max']).'"' : '')
             .(! empty($p['disabled']) ? ' disabled' : '')
-            .' class="border border-theme-outline rounded-lg px-3 py-2 bg-theme-surface text-theme-on-surface outline-none focus:border-theme-primary disabled:opacity-50">';
+            .' class="border '.(! empty($p['is_error']) ? 'border-theme-destructive' : 'border-theme-outline').' rounded-lg px-3 py-2 bg-theme-surface text-theme-on-surface outline-none focus:border-theme-primary disabled:opacity-50">';
 
-        $label = isset($p['label']) && $p['label'] !== ''
-            ? '<span class="text-sm font-medium text-theme-on-surface-variant">'.static::e($p['label']).'</span>'
-            : '';
-
-        return '<label class="flex flex-col gap-1 '.static::webClass($node).'">'.$label.$field.'</label>';
+        return '<label class="flex flex-col gap-1 '.static::webClass($node).'">'
+            .static::fieldLabel($p).$field.static::fieldSupporting($p).'</label>';
     }
 
     protected static function radioGroup(array $node, array $p, array $ctx): string
@@ -567,16 +648,12 @@ class WebRenderer
             'value' => (string) ($p['value'] ?? ''),
         ];
 
-        $label = isset($p['label']) && $p['label'] !== ''
-            ? '<span class="text-sm font-medium text-theme-on-surface-variant">'.static::e($p['label']).'</span>'
-            : '';
-
         // A disabled <fieldset> natively disables every radio inside it —
         // the group-level `disabled` prop needs no per-child plumbing.
         return '<fieldset'.static::idAttr($node)
             .(! empty($p['disabled']) ? ' disabled' : '')
             .' class="flex flex-col gap-2 '.(! empty($p['disabled']) ? 'opacity-60 ' : '').static::webClass($node).'">'
-            .$label.static::children($node, $ctx).'</fieldset>';
+            .static::fieldLabel($p).static::children($node, $ctx).static::fieldSupporting($p).'</fieldset>';
     }
 
     protected static function radio(array $node, array $p, array $ctx): string
@@ -744,6 +821,52 @@ class WebRenderer
             .$leading.$textCol.$trailing."</{$tag}>";
     }
 
+    /**
+     * Windowed list (mobile-ui `<native:virtual-list>`). PHP emits only
+     * the rows inside [window_from..window_to]; native fills the
+     * off-window slots with fixed-height placeholders. Web mirrors that
+     * with two aggregate spacers sized estimated_row_height × the hidden
+     * row counts, so the scrollbar reflects the full list and scroll
+     * offsets map to absolute indices.
+     *
+     * The client (edge-web.js) watches scroll and requests window shifts
+     * through the on_window_change callback — a 'virtual_window'-kind
+     * callback riding the TEXT_CHANGE wire format with "from,to" as the
+     * text (see NativeComponent::dispatch()); the response re-renders
+     * the new slice and these spacers resize.
+     */
+    protected static function virtualList(array $node, array $p, array $ctx): string
+    {
+        $count = max(0, (int) ($p['count'] ?? count($node['children'] ?? [])));
+        $from = max(0, (int) ($p['window_from'] ?? 0));
+        $to = min(max($from, (int) ($p['window_to'] ?? max(0, $count - 1))), max(0, $count - 1));
+        $rowHeight = (float) ($p['estimated_row_height'] ?? 48);
+
+        $attrs = static::idAttr($node).' data-edge-virtual';
+
+        if (! empty($p['on_window_change'])) {
+            $attrs .= ' data-edge-vl-cb="'.((int) $p['on_window_change']).'"'
+                .' data-edge-vl-count="'.$count.'"'
+                .' data-edge-vl-window="'.$from.','.$to.'"'
+                .' data-edge-vl-row="'.$rowHeight.'"'
+                .(isset($p['overscan']) ? ' data-edge-vl-overscan="'.((int) $p['overscan']).'"' : '');
+        }
+
+        // Spacers are unkeyed on purpose: the morph's positional fallback
+        // reuses them and just patches the height style.
+        $spacer = function (int $rows) use ($rowHeight): string {
+            return $rows > 0
+                ? '<div aria-hidden="true" class="shrink-0" style="height:'.($rows * $rowHeight).'px"></div>'
+                : '';
+        };
+
+        return "<div{$attrs} class=\"".static::cls($node, 'flex flex-col w-full overflow-y-auto min-h-0').'">'
+            .$spacer($from)
+            .static::children($node, $ctx)
+            .$spacer($count > 0 ? $count - 1 - $to : 0)
+            .'</div>';
+    }
+
     protected static function lazyGrid(array $node, array $p, array $ctx): string
     {
         $cols = max(1, (int) ($p['columns'] ?? 2));
@@ -870,17 +993,24 @@ class WebRenderer
             ? ' data-edge-dismiss="'.((int) $p['on_dismiss']).'"'
             : '';
 
+        // The panel is the dialog: role/aria-modal for screen readers,
+        // tabindex="-1" so the client runtime can move focus into it when
+        // nothing inside is focusable. The wrapper stays the backdrop
+        // (and the data-edge-overlay hook the runtime's focus trap /
+        // Escape handling / scroll lock key off — see edge-web.js).
+        $dialog = ' role="dialog" aria-modal="true" tabindex="-1"';
+
         if ($sheet) {
-            $panel = '<div class="absolute inset-x-0 bottom-0 max-h-[85%] overflow-y-auto rounded-t-2xl bg-theme-surface shadow-2xl p-4 flex flex-col '.static::webClass($node).'">'
+            $panel = '<div'.$dialog.' class="absolute inset-x-0 bottom-0 max-h-[85%] overflow-y-auto rounded-t-2xl bg-theme-surface shadow-2xl p-4 flex flex-col '.static::webClass($node).'">'
                 .'<div class="self-center w-10 h-1 rounded-full bg-theme-outline-variant mb-3"></div>'
                 .static::children($node, $ctx).'</div>';
         } else {
-            $panel = '<div class="relative m-auto max-w-lg w-[90%] max-h-[85%] overflow-y-auto rounded-2xl bg-theme-surface shadow-2xl p-6 flex flex-col '.static::webClass($node).'">'
+            $panel = '<div'.$dialog.' class="relative m-auto max-w-lg w-[90%] max-h-[85%] overflow-y-auto rounded-2xl bg-theme-surface shadow-2xl p-6 flex flex-col '.static::webClass($node).'">'
                 .static::children($node, $ctx).'</div>';
         }
 
         return '<div'.static::idAttr($node).$dismiss
-            .' class="fixed inset-0 z-50 bg-black/40 flex">'
+            .' data-edge-overlay class="fixed inset-0 z-50 bg-black/40 flex">'
             .$panel.'</div>';
     }
 
@@ -1088,7 +1218,11 @@ class WebRenderer
 
     public static function idAttr(array $node): string
     {
-        return ' data-edge-id="'.((int) ($node['id'] ?? 0)).'"'.static::ariaAttr($node);
+        $domId = (string) ($node['props']['web_id'] ?? '');
+
+        return ' data-edge-id="'.((int) ($node['id'] ?? 0)).'"'
+            .($domId !== '' ? ' id="'.static::e($domId).'"' : '')
+            .static::ariaAttr($node);
     }
 
     /**
@@ -1130,6 +1264,40 @@ class WebRenderer
         }
         if (isset($p['on_double_tap'])) {
             $attrs .= ' data-edge-press="'.((int) $p['on_double_tap']).'"'; // POC: double-tap fires on click
+        }
+
+        return $attrs;
+    }
+
+    /**
+     * The href for a node whose press is a plain navigation, resolved from
+     * the `links` context the transport injects (callback id → uri, see
+     * WebScreenRunner::linkMap()). Null when the press calls a method, is
+     * a back/exit navigation, or no link map was supplied.
+     */
+    public static function linkHref(array $node, array $ctx): ?string
+    {
+        $pressId = $node['on_press'] ?? $node['props']['on_press'] ?? null;
+
+        if ($pressId === null || ! isset($ctx['links'])) {
+            return null;
+        }
+
+        return $ctx['links'][(int) $pressId] ?? null;
+    }
+
+    /**
+     * Anchor attributes for a navigation link. In-app paths also carry
+     * data-edge-navigate so the runtime SPA-navigates them (falling back
+     * to a full load for non-EDGE routes); every other href (mailto:,
+     * tel:, external URLs) is left entirely to the browser.
+     */
+    public static function linkAttrs(string $href): string
+    {
+        $attrs = ' href="'.static::e($href).'"';
+
+        if (str_starts_with($href, '/') && ! str_starts_with($href, '//')) {
+            $attrs .= ' data-edge-navigate="'.static::e($href).'"';
         }
 
         return $attrs;
@@ -1257,6 +1425,46 @@ class WebRenderer
         'slider.horizontal.3' => 'tune',
         'paintpalette' => 'palette',
         'textformat' => 'text_format',
+
+        // Multi-word SF names whose first path segment isn't itself a
+        // mapped symbol — without an exact entry these all collapse to
+        // the neutral `circle` via the base-name fallback below.
+        'align.horizontal.left' => 'align_horizontal_left',
+        'align.horizontal.left.fill' => 'align_horizontal_left',
+        'apps.iphone' => 'phone_iphone',
+        'arrow.left.and.right.square' => 'width',
+        'arrow.left.arrow.right' => 'swap_horiz',
+        'arrow.triangle.2.circlepath' => 'sync',
+        'arrow.up.and.down.square' => 'vertical_align_center',
+        'bubble.left.and.bubble.right' => 'chat',
+        'bubble.left.and.bubble.right.fill' => 'chat',
+        'bubble.left.and.text.bubble.right' => 'forum',
+        'chevron.down.circle' => 'expand_circle_down',
+        'cursorarrow.and.square.on.square.dashed' => 'highlight_alt',
+        'gamecontroller' => 'sports_esports',
+        'gamecontroller.fill' => 'sports_esports',
+        'hand.tap' => 'touch_app',
+        'hand.tap.fill' => 'touch_app',
+        'keyboard.chevron.compact.down' => 'keyboard_hide',
+        'list.bullet.rectangle' => 'list_alt',
+        'rectangle.3.group' => 'dashboard',
+        'rectangle.stack' => 'layers',
+        'rectangle.stack.fill' => 'layers',
+        'square.on.circle' => 'rounded_corner',
+        'square.on.square' => 'filter_none',
+        'square.text.square' => 'input',
+
+        // Dotless SF names bypass the fallback entirely and would reach
+        // the font as a raw ligature, rendering as literal text.
+        'sparkles' => 'auto_awesome',
+
+        // Base-name fallback lands on a real but wrong glyph for these —
+        // an exact entry keeps the meaning.
+        'person.2' => 'group',
+        'person.2.fill' => 'group',
+        'person.crop.circle' => 'account_circle',
+        'play.rectangle' => 'smart_display',
+        'play.rectangle.fill' => 'smart_display',
     ];
 
     /**
