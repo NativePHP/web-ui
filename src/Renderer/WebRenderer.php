@@ -62,7 +62,7 @@ class WebRenderer
             'image' => static::image($node, $p),
             'icon' => static::icon($node, $p),
             'pressable' => static::container($node, 'button', 'flex flex-col appearance-none text-left cursor-pointer', $ctx, ' type="button"'),
-            'button' => static::button($node, $p),
+            'button' => static::button($node, $p, $ctx),
             'outlined_text_input', 'filled_text_input', 'bare_text_input', 'text_input' => static::textInput($node, $p, $type),
             'toggle' => static::toggle($node, $p),
             'checkbox' => static::checkbox($node, $p),
@@ -111,8 +111,16 @@ class WebRenderer
 
     protected static function container(array $node, string $tag, string $base, array $ctx, string $extra = ''): string
     {
-        $isButton = $tag === 'button';
-        $attrs = static::idAttr($node).static::pressAttrs($node, $isButton).static::styleAttr($node).$extra;
+        // A press that is a plain navigation renders as a real anchor:
+        // crawlable, open-in-new-tab friendly, and still SPA-navigated by
+        // the runtime (see linkAttrs()).
+        if (($href = static::linkHref($node, $ctx)) !== null) {
+            $tag = 'a';
+            $attrs = static::idAttr($node).static::linkAttrs($href).static::styleAttr($node);
+        } else {
+            $isButton = $tag === 'button';
+            $attrs = static::idAttr($node).static::pressAttrs($node, $isButton).static::styleAttr($node).$extra;
+        }
 
         return "<{$tag}{$attrs} class=\"".static::cls($node, $base).'">'
             .static::children($node, $ctx)
@@ -206,7 +214,6 @@ class WebRenderer
 
     protected static function text(array $node, array $p, array $ctx): string
     {
-        $attrs = static::idAttr($node).static::pressAttrs($node, false).static::fontAttr($p);
         $class = static::cls($node, '');
 
         // Inline runs: a <text> with children composes ordered spans.
@@ -214,6 +221,15 @@ class WebRenderer
         foreach ($node['children'] ?? [] as $run) {
             $inner .= static::text($run, $run['props'] ?? [], $ctx);
         }
+
+        // Navigation presses become inline anchors (see container()).
+        if (($href = static::linkHref($node, $ctx)) !== null) {
+            $attrs = static::idAttr($node).static::linkAttrs($href).static::fontAttr($p);
+
+            return "<a{$attrs} class=\"{$class}\">{$inner}</a>";
+        }
+
+        $attrs = static::idAttr($node).static::pressAttrs($node, false).static::fontAttr($p);
 
         return "<span{$attrs} class=\"{$class}\">{$inner}</span>";
     }
@@ -353,7 +369,7 @@ class WebRenderer
 
     // ── Inputs & controls ───────────────────────────
 
-    protected static function button(array $node, array $p): string
+    protected static function button(array $node, array $p, array $ctx = []): string
     {
         $variant = $p['variant'] ?? 'primary';
         $size = $p['size'] ?? 'md';
@@ -384,11 +400,21 @@ class WebRenderer
             $inner .= '<span class="material-symbols-outlined text-[20px] leading-none">'.static::e(static::materialName($p['trailing_icon'])).'</span>';
         }
 
+        $class = 'inline-flex items-center justify-center gap-2 font-medium cursor-pointer select-none '
+            .'disabled:opacity-50 disabled:cursor-default active:opacity-80 '
+            .$variantCls.' '.$sizeCls.' '.static::webClass($node);
+
+        // An enabled button whose press is a plain navigation is a styled
+        // anchor (see container()); a disabled one stays a real <button>,
+        // since anchors cannot be disabled.
+        if (! $disabled && ($href = static::linkHref($node, $ctx)) !== null) {
+            return '<a'.static::idAttr($node).static::linkAttrs($href).static::fontAttr($p)
+                .' role="button" class="'.$class.'">'.$inner.'</a>';
+        }
+
         return '<button type="button"'.static::idAttr($node).static::pressAttrs($node, true).static::fontAttr($p)
             .($disabled ? ' disabled' : '')
-            .' class="inline-flex items-center justify-center gap-2 font-medium cursor-pointer select-none '
-            .'disabled:opacity-50 disabled:cursor-default active:opacity-80 '
-            .$variantCls.' '.$sizeCls.' '.static::webClass($node).'">'
+            .' class="'.$class.'">'
             .$inner.'</button>';
     }
 
@@ -1192,7 +1218,11 @@ class WebRenderer
 
     public static function idAttr(array $node): string
     {
-        return ' data-edge-id="'.((int) ($node['id'] ?? 0)).'"'.static::ariaAttr($node);
+        $domId = (string) ($node['props']['web_id'] ?? '');
+
+        return ' data-edge-id="'.((int) ($node['id'] ?? 0)).'"'
+            .($domId !== '' ? ' id="'.static::e($domId).'"' : '')
+            .static::ariaAttr($node);
     }
 
     /**
@@ -1234,6 +1264,40 @@ class WebRenderer
         }
         if (isset($p['on_double_tap'])) {
             $attrs .= ' data-edge-press="'.((int) $p['on_double_tap']).'"'; // POC: double-tap fires on click
+        }
+
+        return $attrs;
+    }
+
+    /**
+     * The href for a node whose press is a plain navigation, resolved from
+     * the `links` context the transport injects (callback id → uri, see
+     * WebScreenRunner::linkMap()). Null when the press calls a method, is
+     * a back/exit navigation, or no link map was supplied.
+     */
+    public static function linkHref(array $node, array $ctx): ?string
+    {
+        $pressId = $node['on_press'] ?? $node['props']['on_press'] ?? null;
+
+        if ($pressId === null || ! isset($ctx['links'])) {
+            return null;
+        }
+
+        return $ctx['links'][(int) $pressId] ?? null;
+    }
+
+    /**
+     * Anchor attributes for a navigation link. In-app paths also carry
+     * data-edge-navigate so the runtime SPA-navigates them (falling back
+     * to a full load for non-EDGE routes); every other href (mailto:,
+     * tel:, external URLs) is left entirely to the browser.
+     */
+    public static function linkAttrs(string $href): string
+    {
+        $attrs = ' href="'.static::e($href).'"';
+
+        if (str_starts_with($href, '/') && ! str_starts_with($href, '//')) {
+            $attrs .= ' data-edge-navigate="'.static::e($href).'"';
         }
 
         return $attrs;
@@ -1361,6 +1425,46 @@ class WebRenderer
         'slider.horizontal.3' => 'tune',
         'paintpalette' => 'palette',
         'textformat' => 'text_format',
+
+        // Multi-word SF names whose first path segment isn't itself a
+        // mapped symbol — without an exact entry these all collapse to
+        // the neutral `circle` via the base-name fallback below.
+        'align.horizontal.left' => 'align_horizontal_left',
+        'align.horizontal.left.fill' => 'align_horizontal_left',
+        'apps.iphone' => 'phone_iphone',
+        'arrow.left.and.right.square' => 'width',
+        'arrow.left.arrow.right' => 'swap_horiz',
+        'arrow.triangle.2.circlepath' => 'sync',
+        'arrow.up.and.down.square' => 'vertical_align_center',
+        'bubble.left.and.bubble.right' => 'chat',
+        'bubble.left.and.bubble.right.fill' => 'chat',
+        'bubble.left.and.text.bubble.right' => 'forum',
+        'chevron.down.circle' => 'expand_circle_down',
+        'cursorarrow.and.square.on.square.dashed' => 'highlight_alt',
+        'gamecontroller' => 'sports_esports',
+        'gamecontroller.fill' => 'sports_esports',
+        'hand.tap' => 'touch_app',
+        'hand.tap.fill' => 'touch_app',
+        'keyboard.chevron.compact.down' => 'keyboard_hide',
+        'list.bullet.rectangle' => 'list_alt',
+        'rectangle.3.group' => 'dashboard',
+        'rectangle.stack' => 'layers',
+        'rectangle.stack.fill' => 'layers',
+        'square.on.circle' => 'rounded_corner',
+        'square.on.square' => 'filter_none',
+        'square.text.square' => 'input',
+
+        // Dotless SF names bypass the fallback entirely and would reach
+        // the font as a raw ligature, rendering as literal text.
+        'sparkles' => 'auto_awesome',
+
+        // Base-name fallback lands on a real but wrong glyph for these —
+        // an exact entry keeps the meaning.
+        'person.2' => 'group',
+        'person.2.fill' => 'group',
+        'person.crop.circle' => 'account_circle',
+        'play.rectangle' => 'smart_display',
+        'play.rectangle.fill' => 'smart_display',
     ];
 
     /**

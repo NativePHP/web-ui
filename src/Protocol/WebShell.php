@@ -14,7 +14,12 @@ use Native\Mobile\Edge\Web\Renderer\WebTheme;
  */
 class WebShell
 {
-    public static function page(string $html, array $state, string $title = 'App'): string
+    /**
+     * @param  string  $head  Extra <head> markup a screen contributes via
+     *                        HasWebHead (meta, Open Graph, JSON-LD) — trusted,
+     *                        emitted raw after <title>.
+     */
+    public static function page(string $html, array $state, string $title = 'App', string $head = ''): string
     {
         // Raw JSON inside <script type="application/json"> — entities are
         // NOT decoded there, so escape via \uXXXX (JSON_HEX_TAG guards
@@ -46,6 +51,7 @@ class WebShell
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{$titleEsc}</title>
+{$head}
 {$tailwind}
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200">
 <style>

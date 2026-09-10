@@ -18,6 +18,9 @@
  *   - State also carries `polls` + `lazy` (protocol events
  *     {type:'poll'} / {type:'lazy'}) and `uploadEndpoint` (multipart
  *     target for window.EdgeUpload). Missing keys = [] / false / none.
+ *   - `hot` {endpoint, token, interval} enables live updates (dev only —
+ *     absent in production). GET endpoint → {token, file, at}; a token
+ *     that differs from the current frame's re-fetches the screen.
  *   - SPA nav: GET with `X-Edge-Nav: 1` → {html, state, title, effects}.
  *   - Effects: [{method, params}] executed in array order, drained
  *     server-side (no ack, no replay). Drivers extendable via
@@ -188,8 +191,17 @@
     head.append(heading, close);
     panel.append(head, content);
     overlay.appendChild(panel);
+    // Exposed so a later success can take the overlay down the same way
+    // the close button does (listener removed, focus restored) — hot
+    // reload clears the last failure once the code renders again.
+    overlay._edgeDismiss = dismiss;
     document.body.appendChild(overlay);
     panel.focus();
+  }
+
+  function dismissErrorOverlay() {
+    const overlay = document.getElementById('edge-error-overlay');
+    if (overlay) (overlay._edgeDismiss || (() => overlay.remove()))();
   }
 
   // ── Keyed DOM morph ─────────────────────────────────────────────────
@@ -554,8 +566,11 @@
         history.pushState({ edge: true }, '', target);
         window.scrollTo(0, 0);
       }
+      const landed = new URL(target, window.location.href);
+      currentPath = landed.pathname + landed.search;
 
       resetPolls(); // clear + re-arm from the new screen's state
+      resetHot(); // ditto: compare against the token THIS frame rendered at
       armLazy();
       runEffects(data.effects);
     } catch (e) {
@@ -569,9 +584,16 @@
     else navigate('/');
   }
 
+  // The path+search the current frame was rendered for. A history entry
+  // that differs only by hash (an in-page `#section` anchor) is the
+  // browser's to handle — re-fetching the screen would swap the DOM and
+  // throw away the scroll it just did.
+  let currentPath = window.location.pathname + window.location.search;
   history.replaceState({ edge: true }, '', window.location.href);
   window.addEventListener('popstate', () => {
-    navigate(window.location.pathname + window.location.search, { push: false });
+    const path = window.location.pathname + window.location.search;
+    if (path === currentPath) return; // hash-only change: let the browser scroll
+    navigate(path, { push: false });
   });
 
   // ── Effects dispatcher ──────────────────────────────────────────────
@@ -908,8 +930,11 @@
       seen.add(ms);
       pollTimers.push(setInterval(() => {
         // Busy? Skip this tick rather than queueing a backlog — the next
-        // tick (or the post-update resync) catches the screen up.
-        if (document.hidden || inFlight || queue.length) return;
+        // tick (or the post-update resync) catches the screen up. Same
+        // for a pending hot re-render: the frame is about to be replaced
+        // wholesale, so polling it is wasted work that would also keep
+        // the queue permanently busy and starve the re-render.
+        if (document.hidden || inFlight || queue.length || hotPending) return;
         enqueue({ type: 'poll' });
       }, ms));
     }
@@ -1071,7 +1096,19 @@
     const t = (sel) => e.target.closest(sel);
     let el;
 
-    if ((el = t('[data-edge-navigate]'))) {
+    if ((el = t('a[href^="#"]')) && !el.hasAttribute('data-edge-navigate')) {
+      // In-page anchor (`#pricing`): scroll to the target ourselves. The
+      // screen lives inside its own scroll container, and a native
+      // fragment jump there is easy to lose to a history-driven re-render;
+      // driving the scroll from the click is deterministic and smooth.
+      const id = decodeURIComponent(el.getAttribute('href').slice(1));
+      const target = id !== '' ? document.getElementById(id) : null;
+      if (target) {
+        e.preventDefault();
+        target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        history.pushState({ edge: true }, '', '#' + id);
+      }
+    } else if ((el = t('[data-edge-navigate]'))) {
       // Honor open-in-new-tab on real anchors.
       if (el.tagName === 'A' && (e.metaKey || e.ctrlKey || e.shiftKey)) return;
       e.preventDefault();
@@ -1185,12 +1222,319 @@
   document.addEventListener('input', (e) => refreshDirty(e.target));
   document.addEventListener('change', (e) => refreshDirty(e.target));
 
+  // ── Live updates (`native:watch`) ────────────────────────────────────
+  // S.hot = {endpoint, token, interval} (absent in production = feature
+  // off, no timer, no requests). Each tick asks the server for the
+  // current change token; when it differs from the one THIS frame was
+  // rendered with, the screen is re-fetched and morphed in — a fresh
+  // mount, which is exactly what the device gets when the watcher pushes
+  // a file. The morph keeps scroll position and focus, so a save lands
+  // without throwing the page away.
+  //
+  // Failures are kept live on purpose: a PHP fatal shows in the error
+  // overlay and polling CONTINUES, so fixing the file heals the page
+  // instead of stranding it on a full-page error screen.
+
+  let hotToken = null;
+  let hotTimer = null;
+  let hotBackoff = 0; // consecutive network failures
+  let hotBusy = false;
+
+  // WebSocket transport. The reload server pushes {type:'reload', file},
+  // so a tab holding one makes NO requests at all until something
+  // actually changes. Polling below is the fallback for tabs that can't
+  // hold a socket (https page refusing ws://, a proxy that won't upgrade).
+  let hotSocket = null;
+  let hotSocketPort = null;
+  /**
+   * Has a socket EVER handshaked on this page? Per-page, not per-attempt:
+   * it's the difference between "this environment can't do sockets, use
+   * HTTP" and "the watcher went away, wait for it" — and a failed
+   * reconnect must read as the second, or stopping the watcher would
+   * permanently demote every open tab to polling.
+   */
+  let hotEverConnected = false;
+  let hotRetry = 0;
+  let hotRetryTimer = null;
+
+  /**
+   * A change is waiting to be applied. Poll timers stand down while this
+   * is set (see resetPolls): on a #[Poll] screen the update queue is
+   * never idle, and a re-render that politely waits for an idle queue
+   * would never run — code changes would simply not show up.
+   */
+  let hotPending = false;
+
+  const hotConfig = () => (S.hot && S.hot.endpoint ? S.hot : null);
+
+  function stopHot() {
+    if (hotTimer) { clearTimeout(hotTimer); hotTimer = null; }
+  }
+
+  /**
+   * (Re)arm live updates against the current state; safe to call any
+   * time. Prefers the socket and only polls when there is no port to
+   * connect to — a state replacement (SPA nav, hot re-render) reuses the
+   * socket it already has rather than churning a connection per frame.
+   */
+  function resetHot() {
+    stopHot();
+    const hot = hotConfig();
+    if (!hot) return;
+
+    hotToken = hot.token || null;
+
+    if (hot.ws) {
+      hotConnect(hot.ws);
+      return;
+    }
+
+    // No server: HTTP fallback (only reachable when something else is
+    // publishing the heartbeat, e.g. `edge:watch --no-socket`).
+    hotDisconnect();
+    if (document.hidden) return; // visibilitychange re-arms on return
+    hotTimer = setTimeout(hotTick, hot.interval || 750);
+  }
+
+  // ── Socket transport ──
+
+  function hotConnect(port) {
+    // Already connected (or connecting) to this port — leave it alone.
+    if (hotSocket && hotSocketPort === port
+      && (hotSocket.readyState === WebSocket.OPEN || hotSocket.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+
+    hotDisconnect();
+    hotSocketPort = port;
+
+    // Same hostname as the page, so native.test and localhost both
+    // resolve to whatever the server bound to.
+    const url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.hostname + ':' + port;
+
+    let sock;
+    try {
+      sock = new WebSocket(url);
+    } catch (e) {
+      hotFallToPolling('could not open ' + url);
+      return;
+    }
+
+    hotSocket = sock;
+
+    sock.onopen = () => {
+      const reconnected = hotEverConnected;
+      hotEverConnected = true;
+      hotRetry = 0;
+      stopHot(); // a socket makes the poll timer redundant
+
+      console.log('[edge] live updates ' + (reconnected ? 'reconnected' : 'connected'));
+
+      // Reconnecting means the watcher restarted, and anything that
+      // changed while it was down was never announced. Catch up.
+      if (reconnected) { hotPending = true; hotApply({}); }
+    };
+
+    sock.onmessage = (event) => {
+      let msg = null;
+      try { msg = JSON.parse(event.data); } catch { /* not ours */ }
+      if (!msg || msg.type !== 'reload') return;
+
+      hotPending = true; // hold #[Poll] off until the re-render lands
+      hotApply({ file: msg.file });
+    };
+
+    sock.onclose = () => {
+      if (hotSocket !== sock) return; // superseded
+
+      hotSocket = null;
+
+      // Never handshook on this page: something sits between us and the
+      // server (an https page refusing ws://, a proxy that won't
+      // upgrade) — polling still works, so use it.
+      if (!hotEverConnected) {
+        hotFallToPolling('socket refused at ' + url);
+        return;
+      }
+
+      // We were connected, so sockets DO work here — the watcher just
+      // stopped or is restarting. Keep trying indefinitely: a refused
+      // connection to a local port costs nothing and reaches no server,
+      // so tabs re-attach by themselves when watching resumes.
+      if (hotRetry === 0) console.log('[edge] live updates disconnected — retrying');
+      hotRetry++;
+      hotRetryTimer = setTimeout(() => hotConnect(port), Math.min(1000 * hotRetry, 10_000));
+    };
+
+    // onerror always precedes onclose; closing is where the decision is.
+    sock.onerror = () => {};
+  }
+
+  function hotDisconnect() {
+    if (hotRetryTimer) { clearTimeout(hotRetryTimer); hotRetryTimer = null; }
+    if (!hotSocket) return;
+
+    const sock = hotSocket;
+    hotSocket = null;
+    sock.onclose = null; // deliberate teardown, not a dropped connection
+    try { sock.close(); } catch { /* already gone */ }
+  }
+
+  /** Socket unavailable in this environment — poll instead, once. */
+  function hotFallToPolling(why) {
+    console.warn('[edge] live updates falling back to polling:', why);
+    hotSocketPort = null;
+    if (document.hidden || hotTimer) return;
+    hotTimer = setTimeout(hotTick, (hotConfig() || {}).interval || 750);
+  }
+
+  async function hotTick() {
+    hotTimer = null;
+    const hot = hotConfig();
+    if (!hot || document.hidden) return;
+
+    try {
+      const res = await fetch(hot.endpoint, {
+        headers: { 'Accept': 'application/json' },
+        cache: 'no-store',
+      });
+
+      // The endpoint is gone (production build, feature turned off). It
+      // is never coming back for this page, so stop asking rather than
+      // retrying a 404 forever.
+      if (res.status === 404 || res.status === 410) {
+        S.hot = null;
+        stopHot();
+        return;
+      }
+
+      if (!res.ok) throw new Error('hot poll ' + res.status);
+
+      const data = await res.json();
+      hotBackoff = 0;
+
+      // The watcher is gone. Nothing will change under us, so stop
+      // asking — this is the difference between "live updates while I'm
+      // developing" and a page that pings forever.
+      if (data.watching === false) {
+        console.log('[edge] live updates stopped — no watcher running');
+        S.hot = null;
+        stopHot();
+        return;
+      }
+
+      // First tick after a frame with no token (older server): adopt
+      // whatever it reports rather than reloading on the difference.
+      if (hotToken === null) hotToken = data.token;
+      else if (data.token !== hotToken) {
+        // Latch first: it holds the poll timers off even if this attempt
+        // has to wait a tick for an in-flight user update to land.
+        hotPending = true;
+        await hotApply(data);
+      }
+    } catch (e) {
+      // Server restarting / dev server down — back off rather than
+      // hammering, and stay quiet after the first complaint.
+      if (hotBackoff === 0) console.warn('[edge] live updates paused:', e.message || e);
+      hotBackoff = Math.min(hotBackoff + 1, 8);
+    }
+
+    const hotNow = hotConfig();
+    if (hotNow && !document.hidden) {
+      hotTimer = setTimeout(hotTick, (hotNow.interval || 750) * (1 + hotBackoff));
+    }
+  }
+
+  /** Re-render the current screen from source. */
+  async function hotApply(poll) {
+    // Never interrupt a user action mid-flight: the next tick still sees
+    // the stale token and retries once the queue drains (hotPending stays
+    // latched meanwhile, so nothing new joins the queue behind it).
+    if (inFlight || queue.length || hotBusy) return;
+
+    hotBusy = true;
+    document.documentElement.setAttribute('data-edge-hot', '');
+
+    try {
+      const url = withPreview(window.location.pathname + window.location.search);
+      const res = await fetch(url, {
+        headers: { 'X-Edge-Nav': '1', 'Accept': 'application/json' },
+        cache: 'no-store',
+      });
+      const type = res.headers.get('content-type') || '';
+
+      if (!res.ok || type.indexOf('application/json') === -1) {
+        // Broken code (fatal, syntax error) or a redirect off the app.
+        // Show it and keep polling — the next SAVE moves the token again
+        // and the fix re-renders the page by itself. Adopting the token
+        // here is what makes it wait for that save instead of re-fetching
+        // the same 500 every tick.
+        let body = '';
+        try { body = await res.text(); } catch { /* connection dropped */ }
+        if (poll.token) hotToken = poll.token;
+        showErrorOverlay(res.status, body);
+        return;
+      }
+
+      const data = await res.json();
+
+      dismissErrorOverlay(); // the code renders again
+      swap(data.html);
+      S = data.state; // full replacement, exactly like an SPA navigation
+      if (data.title) document.title = data.title;
+
+      // Prefer the token the NEW frame was rendered at: a save that lands
+      // mid-render leaves it ahead of the polled one, and the next tick
+      // picks that up instead of settling on stale output.
+      hotToken = (S.hot && S.hot.token) || poll.token || hotToken;
+
+      resetPolls();
+      armLazy();
+      runEffects(data.effects);
+
+      console.log('[edge] live update' + (poll.file ? ' · ' + poll.file : ''));
+    } catch (e) {
+      console.warn('[edge] live update failed:', e);
+    } finally {
+      document.documentElement.removeAttribute('data-edge-hot');
+      hotBusy = false;
+      // Attempted (applied or reported) — let the screen's polls run
+      // again. A still-stale token simply re-latches on the next tick.
+      hotPending = false;
+    }
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    // A socket costs nothing while hidden and keeps the tab current, so
+    // only the polling fallback pauses.
+    if (hotSocket) return;
+
+    if (document.hidden) { stopHot(); return; }
+    // Back from another tab: check straight away rather than waiting out
+    // an interval on what is probably a stale screen.
+    stopHot();
+    if (hotConfig()) hotTick();
+  });
+
   // ── Boot ────────────────────────────────────────────────────────────
 
+  resetHot(); // live updates (no-op unless S.hot is present)
   resetPolls();
   armLazy(); // #[Lazy] placeholder: fetch the real content immediately
   syncOverlays(); // the initial GET may render an already-visible overlay
   runEffects(S.effects); // effects queued during the initial GET render
+
+  // Deep link to a section (`/#pricing`): the screen scrolls inside its
+  // own container, so make the jump ourselves once the frame is painted —
+  // and once more after web fonts settle, since they shift the layout.
+  if (window.location.hash.length > 1) {
+    const target = document.getElementById(decodeURIComponent(window.location.hash.slice(1)));
+    if (target) {
+      const jump = () => target.scrollIntoView({ block: 'start', behavior: 'instant' });
+      setTimeout(jump, 0);
+      if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => setTimeout(jump, 0));
+    }
+  }
 
   console.log('[edge] web runtime ready', S.component);
 })();

@@ -12,6 +12,7 @@ use Native\Mobile\Edge\NativeRouter;
 use Native\Mobile\Edge\NavigationIntent;
 use Native\Mobile\Edge\TreeObservers;
 use Native\Mobile\Edge\Web\Bridge\WebBridge;
+use Native\Mobile\Edge\Web\Contracts\HasWebHead;
 use Native\Mobile\Edge\Web\Renderer\WebRenderer;
 use Native\Mobile\Platform;
 use Native\Mobile\Testing\FakeBridge;
@@ -105,8 +106,9 @@ class WebScreenRunner implements NativeRouteFallback
 
         TreeObservers::tree($tree, $path);
 
-        $html = WebRenderer::render($tree);
+        $html = WebRenderer::render($tree, ['links' => static::linkMap($component)]);
         $title = static::title($component);
+        $head = $component instanceof HasWebHead ? $component->webHead() : '';
         $state = [
             'component' => $componentClass,
             'uri' => $path,
@@ -124,6 +126,12 @@ class WebScreenRunner implements NativeRouteFallback
             // real intervals arrive on the {type:'lazy'} update response.
             'polls' => $lazy ? [] : static::pollIntervals($component),
             'lazy' => $lazy,
+            // Live updates: the token this frame was rendered at, plus
+            // where to poll for a newer one. Null (dev feature off) means
+            // the client never arms its watcher. Re-sent with every SPA
+            // nav / hot re-render, so the client always compares against
+            // the frame it is actually showing.
+            'hot' => EdgeHot::clientState(),
         ];
 
         // Client effects queued during mount/render (dialogs, vibrate,
@@ -142,7 +150,7 @@ class WebScreenRunner implements NativeRouteFallback
             ]);
         }
 
-        return response(WebShell::page(html: $html, state: [...$state, 'effects' => $effects], title: $title));
+        return response(WebShell::page(html: $html, state: [...$state, 'effects' => $effects], title: $title, head: $head));
     }
 
     public function update(Request $request)
@@ -194,8 +202,12 @@ class WebScreenRunner implements NativeRouteFallback
 
         // Restore the validation bag the last frame sealed — dispatch may
         // then mutate it (validate() clears/replaces, sync auto-validation
-        // updates one key) before the re-render captures it again.
-        $component->setErrorBag((array) ($data['errors'] ?? []));
+        // updates one key) before the re-render captures it again. Guarded:
+        // ValidatesProps lives in nativephp/mobile, so an app pinned to a
+        // mobile without it still renders — just with no error carriage.
+        if (method_exists($component, 'setErrorBag')) {
+            $component->setErrorBag((array) ($data['errors'] ?? []));
+        }
 
         // Rebuild the SCREEN's callback registry from the wire maps — no
         // render frame needed. Ids are content-addressed (fnv1a32 of the
@@ -343,7 +355,7 @@ class WebScreenRunner implements NativeRouteFallback
         TreeObservers::tree($tree, $path);
 
         return response()->json([
-            'html' => WebRenderer::render($tree),
+            'html' => WebRenderer::render($tree, ['links' => static::linkMap($component)]),
             'snapshot' => static::sealedSnapshot($component, $componentClass, $path, $params),
             'effects' => WebBridge::current()?->drainEffects() ?? [],
             // Refreshed advisory intervals: Blade `native:poll` timers can
@@ -372,6 +384,9 @@ class WebScreenRunner implements NativeRouteFallback
         NativeElementCollector::captureAttribute('class', 'web_class');
         NativeElementCollector::captureAttribute('style', 'web_style');
         NativeElementCollector::captureAttribute('web', 'web_icon');
+        // `id="pricing"` → a real DOM id, so in-page anchors (`#pricing`),
+        // analytics hooks and CSS can target an element by name.
+        NativeElementCollector::captureAttribute('id', 'web_id');
 
         // Dev preview: `?_platform=mobile` makes @mobile/@web (System::
         // isMobile via Device.GetInfo) resolve as if on device, so the
@@ -568,22 +583,21 @@ class WebScreenRunner implements NativeRouteFallback
             // registries (ownCallbacks), so their expressions never appear
             // in the screen registry. Walk every mounted descendant
             // (children can nest) and merge, so child-owned ids reach the
-            // wire. Ids are content-addressed (fnv1a32 of the expression),
-            // so the same expression carries the same id in every registry
-            // and cross-registry merging is collision-consistent; an
-            // expression the screen already owns stays screen-owned (that
-            // matches dispatch(): findCallbackOwner checks self first).
+            // wire. Child registries are scope-salted (core folds the
+            // child's identity key into every id), so the SAME expression
+            // — `save`, or a `@navigate` the screen also uses — derives a
+            // DISTINCT id per child; key the wire map by scope + expression
+            // so no child's id is collapsed away. update() only ever asks
+            // "is this id child-owned?", and each child re-derives its own
+            // ids on the mounting render, so the keys are informational.
             $childCallbacks = [];
 
-            $walk = function (NativeComponent $c) use (&$walk, &$callbacks, &$childCallbacks, &$navByKey) {
+            $walk = function (NativeComponent $c) use (&$walk, &$childCallbacks, &$navByKey) {
                 foreach ($c->nativeChildComponents as $child) {
-                    foreach ($child->nativeCallbacks->expressions() as $expression => $id) {
-                        assert(($callbacks[$expression] ?? $childCallbacks[$expression] ?? $id) === $id,
-                            "EDGE cross-registry callback id divergence for '{$expression}'");
+                    $scope = $child->nativeCallbacks->scope();
 
-                        if (! isset($callbacks[$expression])) {
-                            $childCallbacks[$expression] ??= $id;
-                        }
+                    foreach ($child->nativeCallbacks->expressions() as $expression => $id) {
+                        $childCallbacks[$scope."\x1F".$expression] = $id;
                     }
 
                     foreach ($child->nativeCallbacks->navigations() as $key => $config) {
@@ -596,18 +610,18 @@ class WebScreenRunner implements NativeRouteFallback
             $walk($this);
 
             // A genuine fnv1a32 collision ACROSS registries (two different
-            // expressions hashing to one id in registries that never saw
-            // each other, so neither salt-rehashed) would make the id
+            // scoped expressions hashing to one id in registries that never
+            // saw each other, so neither salt-rehashed) would make the id
             // ambiguous on the wire. ~1 in 2^31 per pair — assert so dev
             // surfaces it immediately.
             assert((function () use ($callbacks, $childCallbacks) {
                 $seen = [];
                 foreach ([$callbacks, $childCallbacks] as $map) {
-                    foreach ($map as $expression => $id) {
-                        if (isset($seen[$id]) && $seen[$id] !== $expression) {
+                    foreach ($map as $key => $id) {
+                        if (isset($seen[$id]) && $seen[$id] !== $key) {
                             return false;
                         }
-                        $seen[$id] = $expression;
+                        $seen[$id] = $key;
                     }
                 }
 
@@ -629,7 +643,9 @@ class WebScreenRunner implements NativeRouteFallback
             // stand-in for the device's persistent instance keeping its
             // bag between events. Sealed like everything else, so a
             // client can neither forge nor clear errors.
-            'errors' => $component->getErrorBag()->messages(),
+            'errors' => method_exists($component, 'getErrorBag')
+                ? $component->getErrorBag()->messages()
+                : [],
         ]);
     }
 
@@ -707,6 +723,49 @@ class WebScreenRunner implements NativeRouteFallback
         }
 
         return isset($payload['redirect']) ? redirect($payload['redirect']) : redirect('/');
+    }
+
+    /**
+     * Callback id → uri for every press that is a plain `@navigate` /
+     * `@navigate.replace` to a static route, across the screen and its
+     * mounted children. WebRenderer emits those presses as real anchors
+     * (crawlable, open-in-new-tab) that the runtime still SPA-navigates.
+     * Computed AFTER the render frame — that is when children mount and
+     * navigation configs get registered.
+     *
+     * @return array<int, string>
+     */
+    protected static function linkMap(NativeComponent $component): array
+    {
+        return static::scoped($component, function () {
+            /** @var NativeComponent $this */
+            $links = [];
+
+            $walk = function (NativeComponent $c) use (&$walk, &$links) {
+                $navigations = $c->nativeCallbacks->navigations();
+
+                foreach ($c->nativeCallbacks->expressions() as $expression => $id) {
+                    if (! preg_match("/^__navigate\\('([^']+)'\\)$/", $expression, $m)) {
+                        continue;
+                    }
+
+                    $config = $navigations[$m[1]] ?? null;
+                    $uri = $config['uri'] ?? null;
+
+                    if (in_array($config['type'] ?? null, ['navigate', 'replace'], true)
+                        && is_string($uri) && $uri !== '') {
+                        $links[(int) $id] = $uri;
+                    }
+                }
+
+                foreach ($c->nativeChildComponents as $child) {
+                    $walk($child);
+                }
+            };
+            $walk($this);
+
+            return $links;
+        });
     }
 
     /** Document <title> / SPA title: navTitle() with the app name as fallback. */
