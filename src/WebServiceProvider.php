@@ -2,15 +2,19 @@
 
 namespace Native\Mobile\Edge\Web;
 
+use Illuminate\Console\Events\CommandStarting;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\ServiceProvider;
 use Native\Mobile\Edge\Contracts\NativeRouteFallback;
 use Native\Mobile\Edge\Web\Bridge\WebBridge;
 use Native\Mobile\Edge\Web\Protocol\EdgeEndpoint;
+use Native\Mobile\Edge\Web\Protocol\EdgeHot;
 use Native\Mobile\Edge\Web\Protocol\EdgeUpload;
 use Native\Mobile\Edge\Web\Protocol\WebScreenRunner;
 use Native\Mobile\Edge\Web\Renderer\WebRenderer;
 use Native\Mobile\Edge\Web\Replay\ReplayViewer;
+use Native\Mobile\Edge\Web\Server\ReloadServer;
 
 /**
  * Everything the web render target adds to the app: the fallback
@@ -58,7 +62,12 @@ class WebServiceProvider extends ServiceProvider
         }
 
         if ($this->app->runningInConsole()) {
-            $this->commands([Console\EdgeCssCommand::class]);
+            $this->commands([
+                Console\EdgeCssCommand::class,
+                Console\EdgeWatchCommand::class,
+            ]);
+
+            $this->attachToWatchCommand();
         }
 
         // Local-file image srcs → signed serving URLs (see the file
@@ -102,6 +111,15 @@ class WebServiceProvider extends ServiceProvider
             ->middleware('web')
             ->name('edge.web.update');
 
+        // Live updates (`native:watch` / `edge:watch`): the client polls
+        // this for a change token and re-renders the screen when it moves.
+        // No `web` middleware on purpose — a session-backed poll would
+        // hold the session lock and serialize real updates behind it.
+        if (EdgeHot::routable()) {
+            Route::get($edgePrefix.'/hot', [EdgeHot::class, 'poll'])
+                ->name('edge.web.hot');
+        }
+
         // Temporary file uploads (Livewire-style): multipart POST that
         // stores to storage/app/edge-tmp and returns HMAC-signed paths
         // consumable via EdgeUpload::validatePath(). CSRF via `web`.
@@ -144,10 +162,65 @@ class WebServiceProvider extends ServiceProvider
             ]);
         })->name('edge.web.file');
 
-        // POC time-travel replay viewer for recorded sessions.
+        // POC time-travel replay viewer for recorded sessions (see below
+        // for the watch hook — it lives after the routes for readability).
         Route::get($edgePrefix.'/replay', [ReplayViewer::class, 'index'])
             ->middleware('web')->name('edge.replay.index');
         Route::get($edgePrefix.'/replay/{name}', [ReplayViewer::class, 'show'])
             ->where('name', '[A-Za-z0-9]+')->middleware('web')->name('edge.replay.show');
+    }
+
+    /**
+     * Make `native:watch` serve browsers too.
+     *
+     * The device watcher has no channel a browser could join — Android
+     * syncs files over adb and drops a signal the runtime reads, iOS pokes
+     * a TCP server ON the device. Rather than ask core to grow a concept
+     * of web clients, this listens for the command starting and brings up
+     * the plugin's own reload server beside it: same save, both surfaces.
+     *
+     * Installing this package is the opt-in. `nativephp-web.hot_autostart`
+     * = false for anyone who wants the watch command left alone.
+     */
+    protected function attachToWatchCommand(): void
+    {
+        if (config('nativephp-web.hot_autostart', true) === false
+            || config('nativephp-web.hot') === false) {
+            return;
+        }
+
+        Event::listen(CommandStarting::class, function (CommandStarting $event) {
+            if (! $this->commandWatches($event)) {
+                return;
+            }
+
+            if (ReloadServer::start() === null) {
+                return;
+            }
+
+            // The watch command's exit paths (quit key, Ctrl+C, watchman
+            // dying) all funnel through exit(), which runs shutdown
+            // functions — so this is enough to take the server with it.
+            register_shutdown_function(fn () => ReloadServer::stop());
+        });
+    }
+
+    /**
+     * Is this command about to sit and watch files?
+     *
+     * Two commands do, and they are easy to conflate: `native:watch`, and
+     * `native:run --watch` (`-W`), which builds and installs first and
+     * then drops into the SAME watch loop. Matching only the former is a
+     * silent failure — the device hot-reloads while browsers sit there
+     * doing nothing, which looks like the web target is broken.
+     */
+    protected function commandWatches(CommandStarting $event): bool
+    {
+        if ($event->command === 'native:watch') {
+            return true;
+        }
+
+        return $event->command === 'native:run'
+            && (bool) $event->input?->hasParameterOption(['--watch', '-W'], true);
     }
 }

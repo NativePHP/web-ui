@@ -23,7 +23,8 @@ package changes nothing about the native app.
   snapshots, APP_KEY-hashed endpoints, uploads, the page shell.
 - `src/Bridge/` — `WebBridge` + driver registry: PHP drivers or queued
   client effects standing in for device APIs.
-- `src/Console/` — `edge:css` build-time Tailwind compilation.
+- `src/Console/` — `edge:css` build-time Tailwind compilation, `edge:watch`
+  live updates for browsers (see `docs/live-updates.md`).
 - `src/Replay/` — time-travel viewer for recorded tree sessions
   (`TreeRecorder` itself lives in core; devices record too).
 - `resources/js/edge-web.js` — client runtime: keyed DOM morph, event
