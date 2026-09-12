@@ -1,8 +1,10 @@
-# nativephp/mobile-web
+# nativephp/web-ui
 
-**PRIVATE — do not publish.** The EDGE web render target: the same
-`Route::native()` screens an app ships to phones, rendered as HTML in a
-browser from the identical Blade source.
+> **Alpha.** APIs and wire format may change between releases.
+
+The EDGE web render target: the same `Route::native()` screens an app
+ships to phones, rendered as HTML in a browser from the identical Blade
+source.
 
 ## How it plugs in
 
@@ -33,9 +35,22 @@ package changes nothing about the native app.
 
 ## Installing in an app
 
-Path repository + `composer require nativephp/mobile-web:@dev` — run
-composer in the **consuming app**, never in this repo (see
-`~/Herd/plugins/CLAUDE.md`).
+```
+composer require nativephp/web-ui:dev-main
+```
 
-Tests live in the core repo's suite (`tests/Feature/Edge/WebUpdateTest.php`
-etc.) via a dev-only autoload of this package's `src/`.
+Requires `nativephp/mobile` ^4.4. The service provider is auto-discovered;
+nothing else to register.
+
+Contributors working from a local checkout: add it as a path repository
+and run composer in the **consuming app**, never in this repo.
+
+## Contributing
+
+See `CONTRIBUTING.md`. Tests live in the core repo's suite
+(`tests/Feature/Edge/WebUpdateTest.php` etc.) via a dev-only autoload of
+this package's `src/`.
+
+## License
+
+MIT. See `LICENSE`.

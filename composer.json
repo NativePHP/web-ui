@@ -1,8 +1,16 @@
 {
-    "name": "nativephp/mobile-web",
+    "name": "nativephp/web-ui",
     "description": "EDGE web render target for NativePHP — the same screens as HTML in a browser",
+    "keywords": [
+        "nativephp",
+        "laravel",
+        "edge",
+        "mobile",
+        "web",
+        "ssr"
+    ],
     "type": "library",
-    "license": "proprietary",
+    "license": "MIT",
     "authors": [
         {
             "name": "NativePHP",
@@ -11,7 +19,7 @@
     ],
     "require": {
         "php": "^8.2",
-        "nativephp/mobile": "^4.0"
+        "nativephp/mobile": "^4.4"
     },
     "autoload": {
         "psr-4": {
@@ -24,5 +32,18 @@
                 "Native\\Mobile\\Edge\\Web\\WebServiceProvider"
             ]
         }
-    }
+    },
+    "require-dev": {
+        "laravel/pint": "^1.24"
+    },
+    "scripts": {
+        "lint": "pint",
+        "lint:test": "pint --test"
+    },
+    "funding": [
+        {
+            "type": "other",
+            "url": "https://nativephp.com/sponsor"
+        }
+    ]
 }
