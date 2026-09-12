@@ -652,8 +652,8 @@ if (class_exists(HtmlRendererRegistry::class)) {
 
 ## 10. Gotchas checklist
 
-- **Never run composer in this repo** — see `~/Herd/plugins/CLAUDE.md`.
-  Install into a consuming app via a path repository.
+- **Never run composer in this repo** (see `CONTRIBUTING.md`). Install into
+  a consuming app via a path repository.
 - Dynamic Tailwind classes built at runtime (`w-[{{ $x }}%]`) won't exist
   in a production `edge:css` build — use `style=""` (`web_style`) for
   runtime-computed values.
