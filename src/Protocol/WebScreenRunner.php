@@ -340,7 +340,11 @@ class WebScreenRunner implements NativeRouteFallback
 
             static::scoped($component, function () use ($event) {
                 /** @var NativeComponent $this */
-                $this->dispatch($event);
+                if (method_exists($this, 'dispatchUiEvent')) {
+                    $this->dispatchUiEvent($event);
+                } else {
+                    $this->dispatch($event);
+                }
             });
         }
 

@@ -5,6 +5,9 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- Fix browser input and action events on NativePHP versions that expose
+  `dispatchUiEvent()`, retaining the legacy dispatcher for older versions.
+
 First public alpha, installable from `main`. Renders `Route::native()`
 screens as HTML in a browser from the same Blade source the mobile app
 ships.
