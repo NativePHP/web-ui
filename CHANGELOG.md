@@ -5,6 +5,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- Fix a fatal `Call to undefined method ...::mount()` error for screens that
+define no `mount()`: the web boot lifecycle now calls the guarded core
+entrypoint `mountComponent()` instead of invoking `mount()` directly
+(parity with `NativeRouter`).
 - Fix browser input and action events on NativePHP versions that expose
   `dispatchUiEvent()`, retaining the legacy dispatcher for older versions.
 
