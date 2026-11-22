@@ -438,7 +438,7 @@ class WebScreenRunner implements NativeRouteFallback
         // still needed to render the placeholder, but mount() — the slow
         // work being deferred — is skipped until the {type:'lazy'} update.
         if ($mount) {
-            $component->mount();
+            $component->mountComponent();
         }
 
         return $component;
